@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Minidump Analyzer - TouchDesigner Crash Dump Parser</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: #0f0f1a;
+  color: #e0e0e0;
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+.container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+header {
+  text-align: center;
+  padding: 32px 0 16px;
+  border-bottom: 1px solid #2a2a40;
+  margin-bottom: 24px;
+}
+header h1 { font-size: 1.8rem; color: #7eb8ff; margin-bottom: 4px; }
+header p { color: #888; font-size: 0.9rem; }
+
+/* Drop Zone */
+.drop-zone {
+  border: 2px dashed #3a3a5c;
+  border-radius: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 24px;
+  background: #14142a;
+}
+.drop-zone:hover, .drop-zone.drag-over {
+  border-color: #7eb8ff;
+  background: #1a1a35;
+}
+.drop-zone h2 { font-size: 1.2rem; color: #aaa; font-weight: normal; margin-bottom: 8px; }
+.drop-zone p { color: #666; font-size: 0.85rem; }
+.drop-zone input[type="file"] { display: none; }
+
+/* Error */
+.error-box {
+  background: #2a1020;
+  border: 1px solid #ff4060;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 24px;
+  color: #ff8090;
+  display: none;
+}
+
+/* Report */
+#report { display: none; }
+
+.report-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.report-header h2 { color: #7eb8ff; font-size: 1.3rem; }
+
+.btn {
+  background: #2a3a5c;
+  color: #7eb8ff;
+  border: 1px solid #3a4a6c;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s;
+}
+.btn:hover { background: #3a4a6c; }
+
+/* Sections */
+details {
+  background: #14142a;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+summary {
+  padding: 12px 16px;
+  cursor: pointer;
+  font-weight: 600;
+  color: #c0c8e0;
+  user-select: none;
+  list-style: none;
+}
+summary::before {
+  content: "\25B6";
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 0.7rem;
+  transition: transform 0.2s;
+}
+details[open] > summary::before { transform: rotate(90deg); }
+summary::-webkit-details-marker { display: none; }
+
+.section-body { padding: 0 16px 16px; }
+
+/* Key-Value pairs */
+.kv { display: grid; grid-template-columns: 200px 1fr; gap: 4px 12px; font-size: 0.9rem; }
+.kv dt { color: #888; }
+.kv dd { color: #e0e0e0; }
+
+/* Exception highlight */
+.exception-highlight {
+  background: #2a1a10;
+  border: 1px solid #ff8040;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 8px;
+}
+.exception-highlight .kv dt { color: #cc9060; }
+.exception-highlight .kv dd { color: #ffd0a0; }
+
+/* Tables */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.data-table th {
+  text-align: left;
+  padding: 8px;
+  background: #1a1a30;
+  color: #8090b0;
+  font-weight: 600;
+  border-bottom: 1px solid #2a2a40;
+  position: sticky;
+  top: 0;
+}
+.data-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #1a1a30;
+  vertical-align: top;
+}
+.data-table tr:hover td { background: #1a1a2e; }
+
+/* Monospace */
+.mono { font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace; font-size: 0.82rem; }
+
+/* TD module tag */
+.td-tag {
+  display: inline-block;
+  background: #1a2a1a;
+  color: #60cc60;
+  border: 1px solid #2a4a2a;
+  border-radius: 4px;
+  padding: 2px 8px;
+  margin: 2px 4px 2px 0;
+  font-size: 0.82rem;
+}
+
+/* Filter */
+.filter-input {
+  width: 100%;
+  background: #1a1a30;
+  border: 1px solid #2a2a40;
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #e0e0e0;
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+  outline: none;
+}
+.filter-input:focus { border-color: #7eb8ff; }
+.filter-input::placeholder { color: #555; }
+
+.table-wrap { max-height: 400px; overflow-y: auto; }
+
+/* No data */
+.no-data { color: #666; font-style: italic; padding: 8px 0; }
+
+/* Loading */
+.loading {
+  text-align: center;
+  padding: 24px;
+  color: #888;
+  display: none;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Minidump Analyzer</h1>
+  <p>TouchDesigner / Windows .dmp crash dump parser &mdash; runs entirely in browser, no server required</p>
+</header>
+
+<div class="drop-zone" id="dropZone">
+  <h2>.dmp ファイルをドロップ、またはクリックして選択</h2>
+  <p>Windows Minidump (MDMP) 形式に対応</p>
+  <input type="file" id="fileInput" accept=".dmp,.mdmp">
+</div>
+
+<div class="loading" id="loading">解析中...</div>
+<div class="error-box" id="errorBox"></div>
+
+<div id="report">
+  <div class="report-header">
+    <h2>解析レポート</h2>
+    <button class="btn" id="exportBtn">JSON エクスポート</button>
+  </div>
+
+  <!-- Header Info -->
+  <details open>
+    <summary>ヘッダー情報</summary>
+    <div class="section-body" id="headerInfo"></div>
+  </details>
+
+  <!-- System Info -->
+  <details open>
+    <summary>システム情報</summary>
+    <div class="section-body" id="systemInfo"></div>
+  </details>
+
+  <!-- Exception -->
+  <details open>
+    <summary>例外情報</summary>
+    <div class="section-body" id="exceptionInfo"></div>
+  </details>
+
+  <!-- TouchDesigner Modules -->
+  <details open>
+    <summary id="tdModulesTitle">TouchDesigner 関連モジュール</summary>
+    <div class="section-body" id="tdModules"></div>
+  </details>
+
+  <!-- Modules -->
+  <details>
+    <summary id="modulesTitle">モジュール一覧</summary>
+    <div class="section-body" id="modulesInfo"></div>
+  </details>
+
+  <!-- Threads -->
+  <details>
+    <summary id="threadsTitle">スレッド一覧</summary>
+    <div class="section-body" id="threadsInfo"></div>
+  </details>
+
+  <!-- Stream Directory -->
+  <details>
+    <summary id="streamsTitle">ストリームディレクトリ</summary>
+    <div class="section-body" id="streamsInfo"></div>
+  </details>
+</div>
+
+</div>
+
+<script>
+// ============================================================
+// 定数マップ（Python版 MinidumpParser のクラス変数と同一）
+// ============================================================
+
+const STREAM_TYPES = {
+  0: "UnusedStream", 1: "ReservedStream0", 2: "ReservedStream1",
+  3: "ThreadListStream", 4: "ModuleListStream", 5: "MemoryListStream",
+  6: "ExceptionStream", 7: "SystemInfoStream", 8: "ThreadExListStream",
+  9: "Memory64ListStream", 10: "CommentStreamA", 11: "CommentStreamW",
+  12: "HandleDataStream", 13: "FunctionTableStream",
+  14: "UnloadedModuleListStream", 15: "MiscInfoStream",
+  16: "MemoryInfoListStream", 17: "ThreadInfoListStream",
+  18: "HandleOperationListStream", 19: "TokenStream",
+  20: "JavaScriptDataStream", 21: "SystemMemoryInfoStream",
+  22: "ProcessVmCountersStream", 23: "IptTraceStream", 24: "ThreadNamesStream",
+};
+
+const EXCEPTION_CODES = {
+  0xC0000005: "ACCESS_VIOLATION",
+  0xC0000006: "IN_PAGE_ERROR",
+  0xC0000008: "INVALID_HANDLE",
+  0xC000001D: "ILLEGAL_INSTRUCTION",
+  0xC0000025: "NONCONTINUABLE_EXCEPTION",
+  0xC0000026: "INVALID_DISPOSITION",
+  0xC000008C: "ARRAY_BOUNDS_EXCEEDED",
+  0xC000008D: "FLOAT_DENORMAL_OPERAND",
+  0xC000008E: "FLOAT_DIVIDE_BY_ZERO",
+  0xC000008F: "FLOAT_INEXACT_RESULT",
+  0xC0000090: "FLOAT_INVALID_OPERATION",
+  0xC0000091: "FLOAT_OVERFLOW",
+  0xC0000092: "FLOAT_STACK_CHECK",
+  0xC0000093: "FLOAT_UNDERFLOW",
+  0xC0000094: "INTEGER_DIVIDE_BY_ZERO",
+  0xC0000095: "INTEGER_OVERFLOW",
+  0xC0000096: "PRIVILEGED_INSTRUCTION",
+  0xC00000FD: "STACK_OVERFLOW",
+  0xC0000135: "DLL_NOT_FOUND",
+  0xC0000142: "DLL_INIT_FAILED",
+  0xC0000409: "STACK_BUFFER_OVERRUN",
+  0xC0000417: "INVALID_CRUNTIME_PARAMETER",
+  0xC0000602: "UNKNOWN_REVISION",
+  0xC06D007E: "MODULE_NOT_FOUND",
+  0xC06D007F: "PROCEDURE_NOT_FOUND",
+  0xE06D7363: "CPP_EXCEPTION",
+  0x40000015: "STATUS_FATAL_APP_EXIT",
+  0x40010006: "DBG_PRINTEXCEPTION_C",
+  0x4001000A: "DBG_PRINTEXCEPTION_WIDE_C",
+  0x80000001: "GUARD_PAGE_VIOLATION",
+  0x80000003: "BREAKPOINT",
+  0x80000004: "SINGLE_STEP",
+};
+
+const PROCESSOR_ARCHITECTURES = {
+  0: "x86", 5: "ARM", 6: "IA64", 9: "x64", 12: "ARM64",
+};
+
+const TD_MODULE_PATTERNS = [
+  "touchdesigner", "touchengine", "touchplayer", "derivative",
+  "td_", "top_", "chop_", "sop_", "dat_", "comp_", "mat_",
+];
+
+// ============================================================
+// ヘルパー関数
+// ============================================================
+
+function toHex32(val) {
+  return "0x" + (val >>> 0).toString(16).toUpperCase().padStart(8, "0");
+}
+
+function toHex64(bigVal) {
+  return "0x" + bigVal.toString(16).toUpperCase().padStart(16, "0");
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ============================================================
+// パース関数群
+// ============================================================
+
+function readMinidumpString(dv, rva) {
+  if (rva + 4 > dv.byteLength) return "";
+  const length = dv.getUint32(rva, true);
+  const start = rva + 4;
+  if (start + length > dv.byteLength) return "";
+  try {
+    const bytes = new Uint8Array(dv.buffer, start, length);
+    const decoder = new TextDecoder("utf-16le");
+    return decoder.decode(bytes);
+  } catch {
+    return "";
+  }
+}
+
+function parseHeader(dv) {
+  if (dv.byteLength < 32) {
+    throw new Error("ファイルサイズが小さすぎます（最低32バイト必要）");
+  }
+
+  const sig = String.fromCharCode(
+    dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)
+  );
+  if (sig !== "MDMP") {
+    throw new Error(`無効なミニダンプシグネチャ: '${sig}'（'MDMP'が必要）`);
+  }
+
+  const version = dv.getUint16(4, true);
+  const implVersion = dv.getUint16(6, true);
+  const numStreams = dv.getUint32(8, true);
+  const streamDirRva = dv.getUint32(12, true);
+  const checksum = dv.getUint32(16, true);
+  const timestamp = dv.getUint32(20, true);
+  const flagsLo = dv.getUint32(24, true);
+  const flagsHi = dv.getUint32(28, true);
+  const flags = (BigInt(flagsHi) << 32n) | BigInt(flagsLo);
+
+  let tsStr;
+  try {
+    tsStr = new Date(timestamp * 1000).toISOString().replace("T", " ").replace(".000Z", " UTC");
+  } catch {
+    tsStr = `不明 (raw=${timestamp})`;
+  }
+
+  return {
+    signature: sig,
+    version,
+    implementation_version: implVersion,
+    number_of_streams: numStreams,
+    stream_directory_rva: streamDirRva,
+    checksum,
+    timestamp,
+    timestamp_str: tsStr,
+    flags: Number(flags),
+  };
+}
+
+function readStreamDirectory(dv, header) {
+  const entries = [];
+  let offset = header.stream_directory_rva;
+
+  for (let i = 0; i < header.number_of_streams; i++) {
+    if (offset + 12 > dv.byteLength) break;
+    const streamType = dv.getUint32(offset, true);
+    const dataSize = dv.getUint32(offset + 4, true);
+    const rva = dv.getUint32(offset + 8, true);
+    entries.push({
+      stream_type: streamType,
+      stream_type_name: STREAM_TYPES[streamType] || `Unknown(${streamType})`,
+      data_size: dataSize,
+      rva,
+    });
+    offset += 12;
+  }
+  return entries;
+}
+
+function parseSystemInfo(dv, entry) {
+  const o = entry.rva;
+  const procArch = dv.getUint16(o, true);
+  const procLevel = dv.getUint16(o + 2, true);
+  const procRevision = dv.getUint16(o + 4, true);
+  const numProcs = dv.getUint8(o + 6);
+
+  const major = dv.getUint32(o + 8, true);
+  const minor = dv.getUint32(o + 12, true);
+  const build = dv.getUint32(o + 16, true);
+  const platformId = dv.getUint32(o + 20, true);
+
+  return {
+    processor_architecture: procArch,
+    processor_architecture_name: PROCESSOR_ARCHITECTURES[procArch] || `Unknown(${procArch})`,
+    processor_level: procLevel,
+    processor_revision: procRevision,
+    number_of_processors: numProcs,
+    os_version_major: major,
+    os_version_minor: minor,
+    os_build_number: build,
+    os_platform_id: platformId,
+    os_version_string: `Windows ${major}.${minor} Build ${build}`,
+  };
+}
+
+function parseModuleList(dv, entry) {
+  let offset = entry.rva;
+  const numModules = dv.getUint32(offset, true);
+  offset += 4;
+
+  const modules = [];
+  const ENTRY_SIZE = 108;
+
+  for (let i = 0; i < numModules; i++) {
+    if (offset + ENTRY_SIZE > dv.byteLength) break;
+
+    const base = dv.getBigUint64(offset, true);
+    const size = dv.getUint32(offset + 8, true);
+    const checksum = dv.getUint32(offset + 12, true);
+    const ts = dv.getUint32(offset + 16, true);
+    const nameRva = dv.getUint32(offset + 20, true);
+
+    const modulePath = readMinidumpString(dv, nameRva);
+    const parts = modulePath.split("\\");
+    const moduleName = parts[parts.length - 1] || modulePath;
+
+    modules.push({
+      base_address: base,
+      size,
+      module_name: moduleName,
+      module_path: modulePath,
+      timestamp: ts,
+      checksum,
+    });
+    offset += ENTRY_SIZE;
+  }
+  return modules;
+}
+
+function parseThreadList(dv, entry) {
+  let offset = entry.rva;
+  const numThreads = dv.getUint32(offset, true);
+  offset += 4;
+
+  const threads = [];
+  const ENTRY_SIZE = 48;
+
+  for (let i = 0; i < numThreads; i++) {
+    if (offset + ENTRY_SIZE > dv.byteLength) break;
+
+    const threadId = dv.getUint32(offset, true);
+    const suspend = dv.getUint32(offset + 4, true);
+    const pclass = dv.getUint32(offset + 8, true);
+    const priority = dv.getUint32(offset + 12, true);
+    const stackStart = dv.getBigUint64(offset + 24, true);
+    const stackSize = dv.getUint32(offset + 32, true);
+
+    threads.push({
+      thread_id: threadId,
+      suspend_count: suspend,
+      priority_class: pclass,
+      priority,
+      stack_start: stackStart,
+      stack_size: stackSize,
+    });
+    offset += ENTRY_SIZE;
+  }
+  return threads;
+}
+
+function parseException(dv, entry) {
+  let offset = entry.rva;
+
+  const threadId = dv.getUint32(offset, true);
+  offset += 8; // ThreadId + alignment
+
+  const excCode = dv.getUint32(offset, true);
+  const excFlags = dv.getUint32(offset + 4, true);
+  // ExceptionRecord (Q) skipped at offset + 8
+  const excAddress = dv.getBigUint64(offset + 16, true);
+  const numParams = dv.getUint32(offset + 24, true);
+  // unused alignment at offset + 28
+
+  const params = [];
+  let paramOffset = offset + 32;
+  const maxParams = Math.min(numParams, 15);
+  for (let i = 0; i < maxParams; i++) {
+    if (paramOffset + 8 > dv.byteLength) break;
+    params.push(dv.getBigUint64(paramOffset, true));
+    paramOffset += 8;
+  }
+
+  return {
+    thread_id: threadId,
+    exception_code: excCode,
+    exception_code_name: EXCEPTION_CODES[excCode] || `UNKNOWN(${toHex32(excCode)})`,
+    exception_flags: excFlags,
+    exception_address: excAddress,
+    number_parameters: numParams,
+    exception_parameters: params,
+  };
+}
+
+function findCrashModule(exception, modules) {
+  if (!exception) return null;
+  const addr = exception.exception_address;
+  for (const mod of modules) {
+    if (addr >= mod.base_address && addr < mod.base_address + BigInt(mod.size)) {
+      return mod.module_name;
+    }
+  }
+  return null;
+}
+
+function findTDModules(modules) {
+  const result = [];
+  for (const mod of modules) {
+    const nameLower = mod.module_name.toLowerCase();
+    const pathLower = mod.module_path.toLowerCase();
+    for (const pattern of TD_MODULE_PATTERNS) {
+      if (nameLower.includes(pattern) || pathLower.includes(pattern)) {
+        result.push(mod.module_name);
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+// ============================================================
+// メイン解析関数
+// ============================================================
+
+function parseMinidump(arrayBuffer, fileName) {
+  const dv = new DataView(arrayBuffer);
+  const header = parseHeader(dv);
+  const streams = readStreamDirectory(dv, header);
+
+  let systemInfo = null;
+  let modules = [];
+  let threads = [];
+  let exception = null;
+
+  for (const entry of streams) {
+    if (entry.rva + entry.data_size > dv.byteLength) continue;
+    if (entry.data_size === 0) continue;
+
+    switch (entry.stream_type) {
+      case 7: systemInfo = parseSystemInfo(dv, entry); break;
+      case 4: modules = parseModuleList(dv, entry); break;
+      case 3: threads = parseThreadList(dv, entry); break;
+      case 6: exception = parseException(dv, entry); break;
+    }
+  }
+
+  const crashModule = findCrashModule(exception, modules);
+  const tdModules = findTDModules(modules);
+
+  return {
+    file_name: fileName,
+    file_size: arrayBuffer.byteLength,
+    header,
+    streams,
+    system_info: systemInfo,
+    modules,
+    threads,
+    exception,
+    crash_module: crashModule,
+    touchdesigner_modules: tdModules,
+  };
+}
+
+// ============================================================
+// UI描画関数
+// ============================================================
+
+function renderKV(pairs) {
+  let html = '<dl class="kv">';
+  for (const [key, value] of pairs) {
+    html += `<dt>${escapeHtml(key)}</dt><dd class="mono">${escapeHtml(String(value))}</dd>`;
+  }
+  html += "</dl>";
+  return html;
+}
+
+function displayReport(report) {
+  // Header Info
+  document.getElementById("headerInfo").innerHTML = renderKV([
+    ["シグネチャ", report.header.signature],
+    ["バージョン", `${report.header.version} (impl: ${report.header.implementation_version})`],
+    ["タイムスタンプ", report.header.timestamp_str],
+    ["ストリーム数", report.header.number_of_streams],
+    ["チェックサム", toHex32(report.header.checksum)],
+    ["フラグ", "0x" + report.header.flags.toString(16).toUpperCase().padStart(16, "0")],
+    ["ファイルサイズ", formatSize(report.file_size)],
+  ]);
+
+  // System Info
+  const si = report.system_info;
+  if (si) {
+    document.getElementById("systemInfo").innerHTML = renderKV([
+      ["OS", si.os_version_string],
+      ["CPU アーキテクチャ", si.processor_architecture_name],
+      ["プロセッサレベル", si.processor_level],
+      ["プロセッサリビジョン", "0x" + si.processor_revision.toString(16).toUpperCase()],
+      ["プロセッサ数", si.number_of_processors],
+      ["プラットフォームID", si.os_platform_id],
+    ]);
+  } else {
+    document.getElementById("systemInfo").innerHTML = '<p class="no-data">SystemInfoStream が見つかりません</p>';
+  }
+
+  // Exception Info
+  const exc = report.exception;
+  if (exc) {
+    let html = '<div class="exception-highlight">';
+    html += renderKV([
+      ["例外コード", `${toHex32(exc.exception_code)} (${exc.exception_code_name})`],
+      ["例外アドレス", toHex64(exc.exception_address)],
+      ["スレッドID", toHex32(exc.thread_id)],
+      ["クラッシュモジュール", report.crash_module || "不明"],
+      ["例外フラグ", toHex32(exc.exception_flags)],
+      ["パラメータ数", exc.number_parameters],
+    ]);
+    if (exc.exception_parameters.length > 0) {
+      html += '<div style="margin-top:8px"><dt style="color:#cc9060;margin-bottom:4px">パラメータ:</dt>';
+      for (let i = 0; i < exc.exception_parameters.length; i++) {
+        html += `<dd class="mono" style="color:#ffd0a0;margin-left:16px">[${i}] ${toHex64(exc.exception_parameters[i])}</dd>`;
+      }
+      html += "</div>";
+    }
+    html += "</div>";
+    document.getElementById("exceptionInfo").innerHTML = html;
+  } else {
+    document.getElementById("exceptionInfo").innerHTML = '<p class="no-data">ExceptionStream が見つかりません（クラッシュ情報なし）</p>';
+  }
+
+  // TouchDesigner Modules
+  const tdMods = report.touchdesigner_modules;
+  document.getElementById("tdModulesTitle").textContent = `TouchDesigner 関連モジュール (${tdMods.length}個)`;
+  if (tdMods.length > 0) {
+    document.getElementById("tdModules").innerHTML = tdMods.map(
+      m => `<span class="td-tag">${escapeHtml(m)}</span>`
+    ).join("");
+  } else {
+    document.getElementById("tdModules").innerHTML = '<p class="no-data">TouchDesigner 関連モジュールは見つかりませんでした</p>';
+  }
+
+  // Modules Table
+  const mods = report.modules;
+  document.getElementById("modulesTitle").textContent = `モジュール一覧 (${mods.length}個)`;
+  let modHtml = '<input type="text" class="filter-input" placeholder="モジュール名で検索..." oninput="filterTable(this, \'modulesTable\')">';
+  modHtml += '<div class="table-wrap"><table class="data-table" id="modulesTable">';
+  modHtml += "<thead><tr><th>ベースアドレス</th><th>サイズ</th><th>モジュール名</th><th>パス</th></tr></thead><tbody>";
+  for (const m of mods) {
+    modHtml += `<tr>
+      <td class="mono">${toHex64(m.base_address)}</td>
+      <td class="mono">${formatSize(m.size)}</td>
+      <td>${escapeHtml(m.module_name)}</td>
+      <td style="color:#888;font-size:0.78rem">${escapeHtml(m.module_path)}</td>
+    </tr>`;
+  }
+  modHtml += "</tbody></table></div>";
+  document.getElementById("modulesInfo").innerHTML = modHtml;
+
+  // Threads Table
+  const threads = report.threads;
+  document.getElementById("threadsTitle").textContent = `スレッド一覧 (${threads.length}個)`;
+  let thHtml = '<div class="table-wrap"><table class="data-table">';
+  thHtml += "<thead><tr><th>スレッドID</th><th>サスペンド</th><th>優先度クラス</th><th>優先度</th><th>スタック開始</th><th>スタックサイズ</th></tr></thead><tbody>";
+  for (const t of threads) {
+    const isCrashThread = exc && t.thread_id === exc.thread_id;
+    const style = isCrashThread ? ' style="color:#ff8040;font-weight:600"' : "";
+    thHtml += `<tr${style}>
+      <td class="mono">${toHex32(t.thread_id)}${isCrashThread ? " *" : ""}</td>
+      <td class="mono">${t.suspend_count}</td>
+      <td class="mono">${t.priority_class}</td>
+      <td class="mono">${t.priority}</td>
+      <td class="mono">${toHex64(t.stack_start)}</td>
+      <td class="mono">${formatSize(t.stack_size)}</td>
+    </tr>`;
+  }
+  thHtml += "</tbody></table></div>";
+  if (exc) thHtml += '<p style="color:#888;font-size:0.78rem;margin-top:4px">* = クラッシュスレッド</p>';
+  document.getElementById("threadsInfo").innerHTML = thHtml;
+
+  // Stream Directory
+  const sts = report.streams;
+  document.getElementById("streamsTitle").textContent = `ストリームディレクトリ (${sts.length}個)`;
+  let stHtml = '<div class="table-wrap"><table class="data-table">';
+  stHtml += "<thead><tr><th>タイプID</th><th>タイプ名</th><th>データサイズ</th><th>RVA</th></tr></thead><tbody>";
+  for (const s of sts) {
+    stHtml += `<tr>
+      <td class="mono">${s.stream_type}</td>
+      <td>${escapeHtml(s.stream_type_name)}</td>
+      <td class="mono">${formatSize(s.data_size)}</td>
+      <td class="mono">${toHex32(s.rva)}</td>
+    </tr>`;
+  }
+  stHtml += "</tbody></table></div>";
+  document.getElementById("streamsInfo").innerHTML = stHtml;
+
+  document.getElementById("report").style.display = "block";
+}
+
+function filterTable(input, tableId) {
+  const filter = input.value.toLowerCase();
+  const rows = document.getElementById(tableId).querySelectorAll("tbody tr");
+  for (const row of rows) {
+    const text = row.textContent.toLowerCase();
+    row.style.display = text.includes(filter) ? "" : "none";
+  }
+}
+
+// ============================================================
+// JSON エクスポート
+// ============================================================
+
+function buildExportJSON(report) {
+  const bigIntToStr = (key, value) => {
+    if (typeof value === "bigint") return "0x" + value.toString(16).toUpperCase().padStart(16, "0");
+    return value;
+  };
+
+  const data = {
+    file_name: report.file_name,
+    file_size: report.file_size,
+    header: report.header,
+    streams: report.streams,
+    system_info: report.system_info,
+    modules: report.modules.map(m => ({
+      ...m,
+      base_address: Number(m.base_address),
+      base_address_hex: toHex64(m.base_address),
+    })),
+    threads: report.threads.map(t => ({
+      ...t,
+      thread_id_hex: toHex32(t.thread_id),
+      stack_start: Number(t.stack_start),
+      stack_start_hex: toHex64(t.stack_start),
+    })),
+    exception: report.exception ? {
+      ...report.exception,
+      exception_code_hex: toHex32(report.exception.exception_code),
+      exception_address: Number(report.exception.exception_address),
+      exception_address_hex: toHex64(report.exception.exception_address),
+      exception_parameters: report.exception.exception_parameters.map(p => Number(p)),
+    } : null,
+    crash_module: report.crash_module,
+    touchdesigner_modules: report.touchdesigner_modules,
+  };
+
+  return JSON.stringify(data, null, 2);
+}
+
+function exportJSON(report) {
+  const json = buildExportJSON(report);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = report.file_name.replace(/\.dmp$/i, "") + "_report.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ============================================================
+// ファイル入力ハンドリング
+// ============================================================
+
+let currentReport = null;
+
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("fileInput");
+const errorBox = document.getElementById("errorBox");
+const loading = document.getElementById("loading");
+const reportEl = document.getElementById("report");
+
+function showError(msg) {
+  errorBox.textContent = msg;
+  errorBox.style.display = "block";
+  reportEl.style.display = "none";
+  loading.style.display = "none";
+}
+
+function hideError() {
+  errorBox.style.display = "none";
+}
+
+function handleFile(file) {
+  hideError();
+  reportEl.style.display = "none";
+  loading.style.display = "block";
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      currentReport = parseMinidump(e.target.result, file.name);
+      loading.style.display = "none";
+      displayReport(currentReport);
+    } catch (err) {
+      showError("解析エラー: " + err.message);
+    }
+  };
+  reader.onerror = function() {
+    showError("ファイルの読み込みに失敗しました");
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// Click to select
+dropZone.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", (e) => {
+  if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+// Drag and drop
+dropZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropZone.classList.add("drag-over");
+});
+dropZone.addEventListener("dragleave", () => {
+  dropZone.classList.remove("drag-over");
+});
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("drag-over");
+  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+});
+
+// Export button
+document.getElementById("exportBtn").addEventListener("click", () => {
+  if (currentReport) exportJSON(currentReport);
+});
+</script>
+</body>
+</html>

@@ -1140,87 +1140,105 @@ function hexDump(arrayBuffer, maxBytes) {
   return lines.join("\n");
 }
 
-// 大容量ファイル対応: ヘッダーのみ先読みして形式判定
-// PAGEDUMP/PAGEDU64 は先頭8KBで解析完了
-// MDMP は最大256MB まで読み込み（通常は数MB〜数十MB）
-const HEADER_PEEK_SIZE = 8;
+// 大容量ファイル対応: 必要な部分だけ段階的に読み込む
+// PAGEDUMP/PAGEDU64: 先頭8KBで解析完了
+// MDMP: ヘッダー→ストリームディレクトリ→必要なストリームのみ読み込み
 const CRASHDUMP_HEADER_SIZE = 0x2000; // 8KB (PAGEDU64用)
-const MDMP_MAX_READ = 256 * 1024 * 1024; // 256MB
+const MDMP_META_MAX = 128 * 1024 * 1024; // メタデータ読み込み上限 128MB
+// メモリストリーム（巨大なので読まない）
+const MEMORY_STREAM_TYPES = new Set([5, 9, 16]);
 
-function handleFile(file) {
+function readSlice(file, start, end) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("ファイルの読み込みに失敗しました"));
+    reader.readAsArrayBuffer(file.slice(start, end));
+  });
+}
+
+async function handleFile(file) {
   hideError();
   reportEl.style.display = "none";
   loading.style.display = "block";
 
-  // Step 1: 先頭8バイトだけ読んで形式を判定
-  const peekReader = new FileReader();
-  peekReader.onload = function(e) {
-    const peekBuf = e.target.result;
+  try {
+    // Step 1: 先頭8バイトで形式判定
+    const peekBuf = await readSlice(file, 0, 8);
+    if (peekBuf.byteLength < 4) throw new Error("ファイルサイズが小さすぎます");
     const peek = new DataView(peekBuf);
-    if (peekBuf.byteLength < 4) {
-      showError("ファイルサイズが小さすぎます");
-      return;
-    }
-
     const sig4 = String.fromCharCode(peek.getUint8(0), peek.getUint8(1), peek.getUint8(2), peek.getUint8(3));
 
     if (sig4 === "PAGE") {
-      // フルクラッシュダンプ: 先頭8KBのみ読み込み
-      const headerSlice = file.slice(0, CRASHDUMP_HEADER_SIZE);
-      const headerReader = new FileReader();
-      headerReader.onload = function(e2) {
-        try {
-          currentReport = parseDumpFile(e2.target.result, file.name);
-          currentReport.file_size = file.size; // 実際のファイルサイズ
-          loading.style.display = "none";
-          displayReport(currentReport);
-        } catch (err) {
-          showError("解析エラー: " + err.message);
-        }
-      };
-      headerReader.onerror = () => showError("ファイルの読み込みに失敗しました");
-      headerReader.readAsArrayBuffer(headerSlice);
+      // フルクラッシュダンプ: 先頭8KBのみ
+      const headerBuf = await readSlice(file, 0, CRASHDUMP_HEADER_SIZE);
+      currentReport = parseDumpFile(headerBuf, file.name);
+      currentReport.file_size = file.size;
 
     } else if (sig4 === "MDMP") {
-      // ミニダンプ: ファイル全体を読み込み（通常は小さい）
-      if (file.size > MDMP_MAX_READ) {
-        showError(`MDMPファイルが大きすぎます（${formatSize(file.size)}）。最大${formatSize(MDMP_MAX_READ)}まで対応しています。`);
-        return;
-      }
-      const fullReader = new FileReader();
-      fullReader.onload = function(e2) {
-        try {
-          currentReport = parseDumpFile(e2.target.result, file.name);
-          loading.style.display = "none";
-          displayReport(currentReport);
-        } catch (err) {
-          showError("解析エラー: " + err.message);
-        }
-      };
-      fullReader.onerror = () => showError("ファイルの読み込みに失敗しました");
-      fullReader.readAsArrayBuffer(file);
+      // 大容量MDMP対応: 段階的読み込み
+      currentReport = await handleMdmpFile(file);
 
     } else {
-      // 未知の形式 → 先頭256バイトのHexダンプを表示
-      const diagSlice = file.slice(0, 256);
-      const diagReader = new FileReader();
-      diagReader.onload = function(e2) {
-        const dump = hexDump(e2.target.result, 256);
-        showError(
-          `<strong>未対応のダンプ形式です</strong><br>` +
-          `シグネチャ: '${escapeHtml(sig4)}' (期待: 'MDMP', 'PAGE')<br>` +
-          `ファイルサイズ: ${formatSize(file.size)}<br><br>` +
-          `<strong>先頭256バイト（Hex Dump）:</strong><br>` +
-          `<pre style="margin-top:8px;font-size:0.75rem;overflow-x:auto;color:#ff8090">${escapeHtml(dump)}</pre>` +
-          `<br>この情報を開発者に共有することで、この形式への対応が可能になる場合があります。`
-        );
-      };
-      diagReader.onerror = () => showError("ファイルの読み込みに失敗しました");
-      diagReader.readAsArrayBuffer(diagSlice);
+      // 未知の形式: 先頭256バイトのHexダンプを表示
+      const diagBuf = await readSlice(file, 0, 256);
+      const dump = hexDump(diagBuf, 256);
+      showError(
+        `<strong>未対応のダンプ形式です</strong><br>` +
+        `シグネチャ: '${escapeHtml(sig4)}' (期待: 'MDMP', 'PAGE')<br>` +
+        `ファイルサイズ: ${formatSize(file.size)}<br><br>` +
+        `<strong>先頭256バイト（Hex Dump）:</strong><br>` +
+        `<pre style="margin-top:8px;font-size:0.75rem;overflow-x:auto;color:#ff8090">${escapeHtml(dump)}</pre>` +
+        `<br>この情報を開発者に共有することで、この形式への対応が可能になる場合があります。`
+      );
+      return;
     }
-  };
-  peekReader.onerror = () => showError("ファイルの読み込みに失敗しました");
-  peekReader.readAsArrayBuffer(file.slice(0, HEADER_PEEK_SIZE));
+
+    loading.style.display = "none";
+    displayReport(currentReport);
+  } catch (err) {
+    showError("解析エラー: " + err.message);
+  }
+}
+
+async function handleMdmpFile(file) {
+  // Step 1: MDMPヘッダー読み込み（32バイト）
+  const headerBuf = await readSlice(file, 0, 32);
+  const hdr = new DataView(headerBuf);
+  const numStreams = hdr.getUint32(8, true);
+  const streamDirRva = hdr.getUint32(12, true);
+
+  // Step 2: ストリームディレクトリ読み込み
+  const dirSize = numStreams * 12;
+  const dirBuf = await readSlice(file, streamDirRva, streamDirRva + dirSize);
+  const dirDv = new DataView(dirBuf);
+
+  // Step 3: メタデータストリームの最大オフセットを算出
+  // メモリストリーム(type 5,9,16)は巨大なのでスキップ
+  let maxNeeded = streamDirRva + dirSize;
+
+  for (let i = 0; i < numStreams; i++) {
+    const off = i * 12;
+    if (off + 12 > dirBuf.byteLength) break;
+    const sType = dirDv.getUint32(off, true);
+    const sSize = dirDv.getUint32(off + 4, true);
+    const sRva = dirDv.getUint32(off + 8, true);
+
+    if (MEMORY_STREAM_TYPES.has(sType)) continue; // メモリストリームはスキップ
+    if (sSize > 0) {
+      const end = sRva + sSize;
+      if (end > maxNeeded) maxNeeded = end;
+    }
+  }
+
+  // 安全上限
+  if (maxNeeded > MDMP_META_MAX) maxNeeded = MDMP_META_MAX;
+
+  // Step 4: 必要な範囲をまとめて読み込み
+  const dataBuf = await readSlice(file, 0, maxNeeded);
+  const report = parseDumpFile(dataBuf, file.name);
+  report.file_size = file.size; // 実際のファイルサイズを反映
+  return report;
 }
 
 // Click to select

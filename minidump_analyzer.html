@@ -854,8 +854,14 @@ function parseDumpFile(arrayBuffer, fileName) {
     if (valid4 === "DUMP") return parseCrashdump32(dv, fileName);
   }
 
+  // 先頭16バイトをHex表示
+  const hexBytes = [];
+  for (let i = 0; i < Math.min(16, dv.byteLength); i++) {
+    hexBytes.push(dv.getUint8(i).toString(16).toUpperCase().padStart(2, "0"));
+  }
   throw new Error(
-    `未対応のダンプ形式です（シグネチャ: '${sig4}'）。MDMP, PAGEDUMP, PAGEDU64 のいずれかが必要です。`
+    `未対応のダンプ形式です。シグネチャ: '${sig4}'、先頭: [${hexBytes.join(" ")}]。` +
+    `MDMP, PAGEDUMP, PAGEDU64 のいずれかが必要です。`
   );
 }
 
@@ -1109,7 +1115,7 @@ const loading = document.getElementById("loading");
 const reportEl = document.getElementById("report");
 
 function showError(msg) {
-  errorBox.textContent = msg;
+  errorBox.innerHTML = msg;
   errorBox.style.display = "block";
   reportEl.style.display = "none";
   loading.style.display = "none";
@@ -1119,25 +1125,102 @@ function hideError() {
   errorBox.style.display = "none";
 }
 
+function hexDump(arrayBuffer, maxBytes) {
+  const bytes = new Uint8Array(arrayBuffer, 0, Math.min(maxBytes, arrayBuffer.byteLength));
+  let hex = "", ascii = "", lines = [];
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).toUpperCase().padStart(2, "0") + " ";
+    ascii += (bytes[i] >= 0x20 && bytes[i] < 0x7F) ? String.fromCharCode(bytes[i]) : ".";
+    if ((i + 1) % 16 === 0 || i === bytes.length - 1) {
+      const addr = (i - (i % 16)).toString(16).toUpperCase().padStart(8, "0");
+      lines.push(`${addr}  ${hex.padEnd(48)} ${ascii}`);
+      hex = ""; ascii = "";
+    }
+  }
+  return lines.join("\n");
+}
+
+// 大容量ファイル対応: ヘッダーのみ先読みして形式判定
+// PAGEDUMP/PAGEDU64 は先頭8KBで解析完了
+// MDMP は最大256MB まで読み込み（通常は数MB〜数十MB）
+const HEADER_PEEK_SIZE = 8;
+const CRASHDUMP_HEADER_SIZE = 0x2000; // 8KB (PAGEDU64用)
+const MDMP_MAX_READ = 256 * 1024 * 1024; // 256MB
+
 function handleFile(file) {
   hideError();
   reportEl.style.display = "none";
   loading.style.display = "block";
 
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    try {
-      currentReport = parseDumpFile(e.target.result, file.name);
-      loading.style.display = "none";
-      displayReport(currentReport);
-    } catch (err) {
-      showError("解析エラー: " + err.message);
+  // Step 1: 先頭8バイトだけ読んで形式を判定
+  const peekReader = new FileReader();
+  peekReader.onload = function(e) {
+    const peekBuf = e.target.result;
+    const peek = new DataView(peekBuf);
+    if (peekBuf.byteLength < 4) {
+      showError("ファイルサイズが小さすぎます");
+      return;
+    }
+
+    const sig4 = String.fromCharCode(peek.getUint8(0), peek.getUint8(1), peek.getUint8(2), peek.getUint8(3));
+
+    if (sig4 === "PAGE") {
+      // フルクラッシュダンプ: 先頭8KBのみ読み込み
+      const headerSlice = file.slice(0, CRASHDUMP_HEADER_SIZE);
+      const headerReader = new FileReader();
+      headerReader.onload = function(e2) {
+        try {
+          currentReport = parseDumpFile(e2.target.result, file.name);
+          currentReport.file_size = file.size; // 実際のファイルサイズ
+          loading.style.display = "none";
+          displayReport(currentReport);
+        } catch (err) {
+          showError("解析エラー: " + err.message);
+        }
+      };
+      headerReader.onerror = () => showError("ファイルの読み込みに失敗しました");
+      headerReader.readAsArrayBuffer(headerSlice);
+
+    } else if (sig4 === "MDMP") {
+      // ミニダンプ: ファイル全体を読み込み（通常は小さい）
+      if (file.size > MDMP_MAX_READ) {
+        showError(`MDMPファイルが大きすぎます（${formatSize(file.size)}）。最大${formatSize(MDMP_MAX_READ)}まで対応しています。`);
+        return;
+      }
+      const fullReader = new FileReader();
+      fullReader.onload = function(e2) {
+        try {
+          currentReport = parseDumpFile(e2.target.result, file.name);
+          loading.style.display = "none";
+          displayReport(currentReport);
+        } catch (err) {
+          showError("解析エラー: " + err.message);
+        }
+      };
+      fullReader.onerror = () => showError("ファイルの読み込みに失敗しました");
+      fullReader.readAsArrayBuffer(file);
+
+    } else {
+      // 未知の形式 → 先頭256バイトのHexダンプを表示
+      const diagSlice = file.slice(0, 256);
+      const diagReader = new FileReader();
+      diagReader.onload = function(e2) {
+        const dump = hexDump(e2.target.result, 256);
+        showError(
+          `<strong>未対応のダンプ形式です</strong><br>` +
+          `シグネチャ: '${escapeHtml(sig4)}' (期待: 'MDMP', 'PAGE')<br>` +
+          `ファイルサイズ: ${formatSize(file.size)}<br><br>` +
+          `<strong>先頭256バイト（Hex Dump）:</strong><br>` +
+          `<pre style="margin-top:8px;font-size:0.75rem;overflow-x:auto;color:#ff8090">${escapeHtml(dump)}</pre>` +
+          `<br>この情報を開発者に共有することで、この形式への対応が可能になる場合があります。`
+        );
+      };
+      diagReader.onerror = () => showError("ファイルの読み込みに失敗しました");
+      diagReader.readAsArrayBuffer(diagSlice);
     }
   };
-  reader.onerror = function() {
-    showError("ファイルの読み込みに失敗しました");
-  };
-  reader.readAsArrayBuffer(file);
+  peekReader.onerror = () => showError("ファイルの読み込みに失敗しました");
+  peekReader.readAsArrayBuffer(file.slice(0, HEADER_PEEK_SIZE));
 }
 
 // Click to select

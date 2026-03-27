@@ -1,11 +1,14 @@
 """
-Windowsミニダンプ（.dmp）ファイル解析モジュール
+Windowsダンプ（.dmp）ファイル解析モジュール
 
 TouchDesignerのクラッシュダンプを解析し、
 クラッシュ原因の特定に必要な情報を抽出する。
 WinDbg等の専用ツールなしで解析が可能。
 
-対応フォーマット: Microsoft Minidump (MDMP)
+対応フォーマット:
+  - Microsoft Minidump (MDMP)
+  - Windows Full/Kernel Crash Dump 32-bit (PAGEDUMP)
+  - Windows Full/Kernel Crash Dump 64-bit (PAGEDU64)
 """
 
 import json
@@ -94,14 +97,26 @@ class ExceptionInfo:
 
 
 @dataclass
+class BugCheckInfo:
+    """BugCheck（BSOD）情報（フルクラッシュダンプ用）"""
+
+    bugcheck_code: int
+    bugcheck_code_name: str
+    bugcheck_parameters: list[int] = field(default_factory=list)
+
+
+@dataclass
 class MinidumpReport:
     """
-    ミニダンプ解析レポート
+    ダンプ解析レポート
 
     解析結果を統合し、クラッシュ情報の保存・表示を行う。
+    MDMP（ミニダンプ）とPAGEDUMP/PAGEDU64（フルダンプ）の
+    両方の形式に対応。
     """
 
     file_path: str
+    dump_format: str  # "MDMP", "PAGEDUMP", "PAGEDU64"
     header: MdmpHeader
     streams: list[MdmpStreamEntry]
     system_info: SystemInfo | None
@@ -110,11 +125,15 @@ class MinidumpReport:
     exception: ExceptionInfo | None
     crash_module: str | None
     touchdesigner_modules: list[str]
+    bugcheck: BugCheckInfo | None = None
+    dump_type_name: str = ""
 
     def save(self, path: str) -> None:
         """解析レポートをJSONファイルに保存する"""
         data = {
             "file_path": self.file_path,
+            "dump_format": self.dump_format,
+            "dump_type_name": self.dump_type_name,
             "header": asdict(self.header),
             "streams": [asdict(s) for s in self.streams],
             "system_info": asdict(self.system_info) if self.system_info else None,
@@ -139,6 +158,14 @@ class MinidumpReport:
                     "exception_address_hex": f"0x{self.exception.exception_address:016X}",
                 }
                 if self.exception
+                else None
+            ),
+            "bugcheck": (
+                {
+                    **asdict(self.bugcheck),
+                    "bugcheck_code_hex": f"0x{self.bugcheck.bugcheck_code:08X}",
+                }
+                if self.bugcheck
                 else None
             ),
             "crash_module": self.crash_module,
@@ -172,8 +199,16 @@ class MinidumpReport:
         else:
             exception = None
 
+        bugcheck_data = data.get("bugcheck")
+        if bugcheck_data:
+            bugcheck_data.pop("bugcheck_code_hex", None)
+            bugcheck = BugCheckInfo(**bugcheck_data)
+        else:
+            bugcheck = None
+
         return cls(
             file_path=data["file_path"],
+            dump_format=data.get("dump_format", "MDMP"),
             header=header,
             streams=streams,
             system_info=system_info,
@@ -182,17 +217,23 @@ class MinidumpReport:
             exception=exception,
             crash_module=data["crash_module"],
             touchdesigner_modules=data["touchdesigner_modules"],
+            bugcheck=bugcheck,
+            dump_type_name=data.get("dump_type_name", ""),
         )
 
     def summary(self) -> str:
         """クラッシュの概要を人間が読める文字列で返す"""
         lines = []
         lines.append("=" * 60)
-        lines.append("ミニダンプ解析レポート")
+        lines.append("ダンプ解析レポート")
         lines.append("=" * 60)
         lines.append(f"ファイル: {self.file_path}")
+        lines.append(f"ダンプ形式: {self.dump_format}")
+        if self.dump_type_name:
+            lines.append(f"ダンプ種別: {self.dump_type_name}")
         lines.append(f"タイムスタンプ: {self.header.timestamp_str}")
-        lines.append(f"ストリーム数: {self.header.number_of_streams}")
+        if self.dump_format == "MDMP":
+            lines.append(f"ストリーム数: {self.header.number_of_streams}")
 
         if self.system_info:
             lines.append("")
@@ -200,6 +241,16 @@ class MinidumpReport:
             lines.append(f"OS: {self.system_info.os_version_string}")
             lines.append(f"CPU: {self.system_info.processor_architecture_name}")
             lines.append(f"プロセッサ数: {self.system_info.number_of_processors}")
+
+        if self.bugcheck:
+            lines.append("")
+            lines.append("--- BugCheck (BSOD) 情報 ---")
+            lines.append(
+                f"BugCheckコード: 0x{self.bugcheck.bugcheck_code:08X}"
+                f" ({self.bugcheck.bugcheck_code_name})"
+            )
+            for i, param in enumerate(self.bugcheck.bugcheck_parameters):
+                lines.append(f"  パラメータ[{i}]: 0x{param:016X}")
 
         if self.exception:
             lines.append("")
@@ -211,23 +262,26 @@ class MinidumpReport:
             lines.append(
                 f"例外アドレス: 0x{self.exception.exception_address:016X}"
             )
-            lines.append(
-                f"スレッドID: 0x{self.exception.thread_id:08X}"
-            )
+            if self.exception.thread_id != 0:
+                lines.append(
+                    f"スレッドID: 0x{self.exception.thread_id:08X}"
+                )
             if self.crash_module:
                 lines.append(f"クラッシュモジュール: {self.crash_module}")
 
-        lines.append("")
-        lines.append(f"--- モジュール ({len(self.modules)}個) ---")
-        for m in self.modules:
-            lines.append(
-                f"  0x{m.base_address:016X}  {m.size:>10}  {m.module_name}"
-            )
+        if self.modules:
+            lines.append("")
+            lines.append(f"--- モジュール ({len(self.modules)}個) ---")
+            for m in self.modules:
+                lines.append(
+                    f"  0x{m.base_address:016X}  {m.size:>10}  {m.module_name}"
+                )
 
-        lines.append("")
-        lines.append(f"--- スレッド ({len(self.threads)}個) ---")
-        for t in self.threads:
-            lines.append(f"  ID=0x{t.thread_id:08X}  優先度={t.priority}")
+        if self.threads:
+            lines.append("")
+            lines.append(f"--- スレッド ({len(self.threads)}個) ---")
+            for t in self.threads:
+                lines.append(f"  ID=0x{t.thread_id:08X}  優先度={t.priority}")
 
         if self.touchdesigner_modules:
             lines.append("")
@@ -241,13 +295,18 @@ class MinidumpReport:
 
 class MinidumpParser:
     """
-    Windowsミニダンプ（.dmp）ファイルの解析クラス
+    Windowsダンプ（.dmp）ファイルの解析クラス
 
     TouchDesignerのクラッシュダンプを解析し、
     クラッシュ原因の特定に必要な情報を抽出する。
 
+    対応フォーマット:
+      - MDMP: Windows Minidump
+      - PAGEDUMP: Windows 32-bit Full/Kernel Crash Dump
+      - PAGEDU64: Windows 64-bit Full/Kernel Crash Dump
+
     使い方:
-        1. parse() でダンプファイルを解析
+        1. parse() でダンプファイルを解析（形式は自動判定）
         2. MinidumpReport の summary() でクラッシュ概要を表示
         3. save() でJSON形式のレポートを保存
 
@@ -256,7 +315,7 @@ class MinidumpParser:
     なし（ステートレス）
     """
 
-    # ストリーム種別の名前マップ
+    # ストリーム種別の名前マップ（MDMP用）
     STREAM_TYPES: dict[int, str] = {
         0: "UnusedStream",
         1: "ReservedStream0",
@@ -345,9 +404,62 @@ class MinidumpParser:
         "mat_",
     ]
 
+    # MachineImageType（フルダンプ用）
+    MACHINE_IMAGE_TYPES: dict[int, str] = {
+        0x014C: "x86",
+        0x0200: "IA64",
+        0x8664: "x64",
+        0xAA64: "ARM64",
+        0x01C4: "ARM",
+    }
+
+    # DumpType（フルダンプ用）
+    DUMP_TYPES: dict[int, str] = {
+        0x01: "Full Dump",
+        0x02: "Kernel Dump",
+        0x03: "Small Dump (Mini)",
+        0x05: "Bitmap Dump",
+    }
+
+    # 主要なBugCheckコード（BSOD）
+    BUGCHECK_CODES: dict[int, str] = {
+        0x0000000A: "IRQL_NOT_LESS_OR_EQUAL",
+        0x0000001E: "KMODE_EXCEPTION_NOT_HANDLED",
+        0x00000019: "BAD_POOL_HEADER",
+        0x0000001A: "MEMORY_MANAGEMENT",
+        0x00000024: "NTFS_FILE_SYSTEM",
+        0x0000002E: "DATA_BUS_ERROR",
+        0x0000003B: "SYSTEM_SERVICE_EXCEPTION",
+        0x00000050: "PAGE_FAULT_IN_NONPAGED_AREA",
+        0x0000007A: "KERNEL_DATA_INPAGE_ERROR",
+        0x0000007B: "INACCESSIBLE_BOOT_DEVICE",
+        0x0000007E: "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED",
+        0x0000007F: "UNEXPECTED_KERNEL_MODE_TRAP",
+        0x0000009F: "DRIVER_POWER_STATE_FAILURE",
+        0x000000BE: "ATTEMPTED_WRITE_TO_READONLY_MEMORY",
+        0x000000C2: "BAD_POOL_CALLER",
+        0x000000C4: "DRIVER_VERIFIER_DETECTED_VIOLATION",
+        0x000000C5: "DRIVER_CORRUPTED_EXPOOL",
+        0x000000D1: "DRIVER_IRQL_NOT_LESS_OR_EQUAL",
+        0x000000EF: "CRITICAL_PROCESS_DIED",
+        0x000000F4: "CRITICAL_OBJECT_TERMINATION",
+        0x00000116: "VIDEO_TDR_TIMEOUT_DETECTED",
+        0x00000117: "VIDEO_TDR_FAILURE",
+        0x00000119: "VIDEO_SCHEDULER_INTERNAL_ERROR",
+        0x00000124: "WHEA_UNCORRECTABLE_ERROR",
+        0x00000133: "DPC_WATCHDOG_VIOLATION",
+        0x00000139: "KERNEL_SECURITY_CHECK_FAILURE",
+        0x0000013A: "KERNEL_MODE_HEAP_CORRUPTION",
+        0x00000154: "UNEXPECTED_STORE_EXCEPTION",
+        0x000001CA: "SYNTHETIC_WATCHDOG_TIMEOUT",
+    }
+
+    # Windows FILETIME エポック変換定数
+    _FILETIME_EPOCH_DIFF = 11644473600  # 1601-01-01 → 1970-01-01（秒）
+
     def parse(self, path: str) -> MinidumpReport:
         """
-        ミニダンプファイルを解析する
+        ダンプファイルを解析する（形式は自動判定）
 
         Parameters
         ----------
@@ -362,7 +474,7 @@ class MinidumpParser:
         Raises
         ------
         ValueError
-            ファイルが有効なミニダンプ形式でない場合
+            ファイルが有効なダンプ形式でない場合
         FileNotFoundError
             ファイルが見つからない場合
         """
@@ -375,6 +487,24 @@ class MinidumpParser:
         if len(data) < 32:
             raise ValueError("ファイルサイズが小さすぎます（最低32バイト必要）")
 
+        # シグネチャ自動判定
+        sig4 = data[0:4]
+        if sig4 == b"MDMP":
+            return self._parse_minidump(data, str(file_path))
+        elif sig4 == b"PAGE":
+            valid_dump = data[4:8]
+            if valid_dump == b"DU64":
+                return self._parse_crashdump_64(data, str(file_path))
+            elif valid_dump == b"DUMP":
+                return self._parse_crashdump_32(data, str(file_path))
+
+        raise ValueError(
+            f"未対応のダンプ形式です（シグネチャ: {sig4!r}）。"
+            "MDMP, PAGEDUMP, PAGEDU64 のいずれかが必要です。"
+        )
+
+    def _parse_minidump(self, data: bytes, file_path: str) -> MinidumpReport:
+        """MDMP形式のミニダンプを解析する"""
         header = self._read_header(data)
         streams = self._read_stream_directory(data, header)
 
@@ -399,7 +529,8 @@ class MinidumpParser:
         td_modules = self._find_touchdesigner_modules(modules)
 
         return MinidumpReport(
-            file_path=str(file_path),
+            file_path=file_path,
+            dump_format="MDMP",
             header=header,
             streams=streams,
             system_info=system_info,
@@ -408,6 +539,256 @@ class MinidumpParser:
             exception=exception,
             crash_module=crash_module,
             touchdesigner_modules=td_modules,
+        )
+
+    def _filetime_to_str(self, filetime: int) -> str:
+        """Windows FILETIMEをUTC文字列に変換する"""
+        try:
+            unix_ts = filetime / 10_000_000 - self._FILETIME_EPOCH_DIFF
+            return datetime.fromtimestamp(
+                unix_ts, tz=timezone.utc
+            ).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except (OSError, ValueError, OverflowError):
+            return f"不明（raw={filetime}）"
+
+    def _parse_crashdump_64(self, data: bytes, file_path: str) -> MinidumpReport:
+        """PAGEDU64形式（64-bit）のフルクラッシュダンプを解析する"""
+        if len(data) < 0x1030:
+            raise ValueError("ファイルサイズが小さすぎます（PAGEDU64ヘッダーに不足）")
+
+        major = struct.unpack_from("<I", data, 0x08)[0]
+        minor = struct.unpack_from("<I", data, 0x0C)[0]
+        machine_type = struct.unpack_from("<I", data, 0x30)[0]
+        num_procs = struct.unpack_from("<I", data, 0x34)[0]
+        bugcheck_code = struct.unpack_from("<I", data, 0x38)[0]
+
+        # BugCheckParameter[4] at 0x40 (ULONGLONG * 4)
+        bugcheck_params = list(struct.unpack_from("<4Q", data, 0x40))
+
+        # DumpType at 0xF98
+        dump_type = struct.unpack_from("<I", data, 0xF98)[0]
+
+        # SystemTime at 0xFA8 (FILETIME)
+        system_time = struct.unpack_from("<Q", data, 0xFA8)[0]
+
+        # Comment at 0xFB0 (128 bytes, null-terminated ASCII)
+        comment_raw = data[0xFB0:0x1030]
+        comment = comment_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace")
+
+        # _EXCEPTION_RECORD64 at 0xF00
+        exception = self._parse_exception_record_64(data, 0xF00)
+
+        arch_name = self.MACHINE_IMAGE_TYPES.get(machine_type, f"Unknown(0x{machine_type:04X})")
+        dump_type_name = self.DUMP_TYPES.get(dump_type, f"Unknown({dump_type})")
+        bugcheck_name = self.BUGCHECK_CODES.get(
+            bugcheck_code, f"UNKNOWN(0x{bugcheck_code:08X})"
+        )
+        ts_str = self._filetime_to_str(system_time)
+
+        header = MdmpHeader(
+            signature="PAGEDU64",
+            version=major,
+            implementation_version=minor,
+            number_of_streams=0,
+            stream_directory_rva=0,
+            checksum=0,
+            timestamp=int(system_time / 10_000_000 - self._FILETIME_EPOCH_DIFF)
+            if system_time > 0
+            else 0,
+            timestamp_str=ts_str,
+            flags=0,
+        )
+
+        system_info = SystemInfo(
+            processor_architecture=machine_type,
+            processor_architecture_name=arch_name,
+            processor_level=0,
+            processor_revision=0,
+            number_of_processors=num_procs,
+            os_version_major=major,
+            os_version_minor=minor,
+            os_build_number=0,
+            os_platform_id=2,
+            os_version_string=f"Windows {major}.{minor}",
+        )
+
+        bugcheck = BugCheckInfo(
+            bugcheck_code=bugcheck_code,
+            bugcheck_code_name=bugcheck_name,
+            bugcheck_parameters=bugcheck_params,
+        )
+
+        return MinidumpReport(
+            file_path=file_path,
+            dump_format="PAGEDU64",
+            header=header,
+            streams=[],
+            system_info=system_info,
+            modules=[],
+            threads=[],
+            exception=exception,
+            crash_module=None,
+            touchdesigner_modules=[],
+            bugcheck=bugcheck,
+            dump_type_name=dump_type_name,
+        )
+
+    def _parse_crashdump_32(self, data: bytes, file_path: str) -> MinidumpReport:
+        """PAGEDUMP形式（32-bit）のフルクラッシュダンプを解析する"""
+        if len(data) < 0xFC8:
+            raise ValueError("ファイルサイズが小さすぎます（PAGEDUMPヘッダーに不足）")
+
+        major = struct.unpack_from("<I", data, 0x08)[0]
+        minor = struct.unpack_from("<I", data, 0x0C)[0]
+        machine_type = struct.unpack_from("<I", data, 0x20)[0]
+        num_procs = struct.unpack_from("<I", data, 0x24)[0]
+        bugcheck_code = struct.unpack_from("<I", data, 0x28)[0]
+
+        # BugCheckParameter[4] at 0x2C (ULONG * 4)
+        bugcheck_params = list(struct.unpack_from("<4I", data, 0x2C))
+
+        # DumpType at 0xF88
+        dump_type = struct.unpack_from("<I", data, 0xF88)[0]
+
+        # SystemTime at 0xFC0 (FILETIME)
+        system_time = struct.unpack_from("<Q", data, 0xFC0)[0]
+
+        # Comment at 0x820 (128 bytes, null-terminated ASCII)
+        comment_raw = data[0x820:0x8A0]
+        comment = comment_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace")
+
+        # _EXCEPTION_RECORD32 at 0x7D0
+        exception = self._parse_exception_record_32(data, 0x7D0)
+
+        arch_name = self.MACHINE_IMAGE_TYPES.get(machine_type, f"Unknown(0x{machine_type:04X})")
+        dump_type_name = self.DUMP_TYPES.get(dump_type, f"Unknown({dump_type})")
+        bugcheck_name = self.BUGCHECK_CODES.get(
+            bugcheck_code, f"UNKNOWN(0x{bugcheck_code:08X})"
+        )
+        ts_str = self._filetime_to_str(system_time)
+
+        header = MdmpHeader(
+            signature="PAGEDUMP",
+            version=major,
+            implementation_version=minor,
+            number_of_streams=0,
+            stream_directory_rva=0,
+            checksum=0,
+            timestamp=int(system_time / 10_000_000 - self._FILETIME_EPOCH_DIFF)
+            if system_time > 0
+            else 0,
+            timestamp_str=ts_str,
+            flags=0,
+        )
+
+        system_info = SystemInfo(
+            processor_architecture=machine_type,
+            processor_architecture_name=arch_name,
+            processor_level=0,
+            processor_revision=0,
+            number_of_processors=num_procs,
+            os_version_major=major,
+            os_version_minor=minor,
+            os_build_number=0,
+            os_platform_id=2,
+            os_version_string=f"Windows {major}.{minor}",
+        )
+
+        bugcheck = BugCheckInfo(
+            bugcheck_code=bugcheck_code,
+            bugcheck_code_name=bugcheck_name,
+            bugcheck_parameters=bugcheck_params,
+        )
+
+        return MinidumpReport(
+            file_path=file_path,
+            dump_format="PAGEDUMP",
+            header=header,
+            streams=[],
+            system_info=system_info,
+            modules=[],
+            threads=[],
+            exception=exception,
+            crash_module=None,
+            touchdesigner_modules=[],
+            bugcheck=bugcheck,
+            dump_type_name=dump_type_name,
+        )
+
+    def _parse_exception_record_64(
+        self, data: bytes, offset: int
+    ) -> ExceptionInfo | None:
+        """_EXCEPTION_RECORD64を解析する（フルダンプ用）"""
+        if offset + 0x98 > len(data):
+            return None
+
+        exc_code = struct.unpack_from("<I", data, offset)[0]
+        exc_flags = struct.unpack_from("<I", data, offset + 4)[0]
+        exc_address = struct.unpack_from("<Q", data, offset + 0x10)[0]
+        num_params = struct.unpack_from("<I", data, offset + 0x18)[0]
+
+        # 例外コードが0の場合は例外なし
+        if exc_code == 0 and exc_address == 0:
+            return None
+
+        params = []
+        max_params = min(num_params, 15)
+        for i in range(max_params):
+            p_off = offset + 0x20 + i * 8
+            if p_off + 8 > len(data):
+                break
+            params.append(struct.unpack_from("<Q", data, p_off)[0])
+
+        code_name = self.EXCEPTION_CODES.get(
+            exc_code, f"UNKNOWN(0x{exc_code:08X})"
+        )
+
+        return ExceptionInfo(
+            thread_id=0,
+            exception_code=exc_code,
+            exception_code_name=code_name,
+            exception_flags=exc_flags,
+            exception_address=exc_address,
+            number_parameters=num_params,
+            exception_parameters=params,
+        )
+
+    def _parse_exception_record_32(
+        self, data: bytes, offset: int
+    ) -> ExceptionInfo | None:
+        """_EXCEPTION_RECORD32を解析する（32-bitフルダンプ用）"""
+        if offset + 0x50 > len(data):
+            return None
+
+        exc_code = struct.unpack_from("<I", data, offset)[0]
+        exc_flags = struct.unpack_from("<I", data, offset + 4)[0]
+        # ExceptionRecord (DWORD, 4)
+        exc_address = struct.unpack_from("<I", data, offset + 0x0C)[0]
+        num_params = struct.unpack_from("<I", data, offset + 0x10)[0]
+
+        if exc_code == 0 and exc_address == 0:
+            return None
+
+        params = []
+        max_params = min(num_params, 15)
+        for i in range(max_params):
+            p_off = offset + 0x14 + i * 4
+            if p_off + 4 > len(data):
+                break
+            params.append(struct.unpack_from("<I", data, p_off)[0])
+
+        code_name = self.EXCEPTION_CODES.get(
+            exc_code, f"UNKNOWN(0x{exc_code:08X})"
+        )
+
+        return ExceptionInfo(
+            thread_id=0,
+            exception_code=exc_code,
+            exception_code_name=code_name,
+            exception_flags=exc_flags,
+            exception_address=exc_address,
+            number_parameters=num_params,
+            exception_parameters=params,
         )
 
     def _read_header(self, data: bytes) -> MdmpHeader:

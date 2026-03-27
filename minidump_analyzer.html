@@ -195,12 +195,12 @@ summary::-webkit-details-marker { display: none; }
 
 <header>
   <h1>Minidump Analyzer</h1>
-  <p>TouchDesigner / Windows .dmp crash dump parser &mdash; runs entirely in browser, no server required</p>
+  <p>TouchDesigner / Windows .dmp crash dump parser &mdash; MDMP, PAGEDUMP, PAGEDU64 対応 &mdash; runs entirely in browser</p>
 </header>
 
 <div class="drop-zone" id="dropZone">
   <h2>.dmp ファイルをドロップ、またはクリックして選択</h2>
-  <p>Windows Minidump (MDMP) 形式に対応</p>
+  <p>MDMP / PAGEDUMP / PAGEDU64 形式に対応</p>
   <input type="file" id="fileInput" accept=".dmp,.mdmp">
 </div>
 
@@ -223,6 +223,12 @@ summary::-webkit-details-marker { display: none; }
   <details open>
     <summary>システム情報</summary>
     <div class="section-body" id="systemInfo"></div>
+  </details>
+
+  <!-- BugCheck (BSOD) -->
+  <details open id="bugcheckSection" style="display:none">
+    <summary>BugCheck (BSOD) 情報</summary>
+    <div class="section-body" id="bugcheckInfo"></div>
   </details>
 
   <!-- Exception -->
@@ -320,6 +326,49 @@ const TD_MODULE_PATTERNS = [
   "td_", "top_", "chop_", "sop_", "dat_", "comp_", "mat_",
 ];
 
+// フルクラッシュダンプ用定数
+const MACHINE_IMAGE_TYPES = {
+  0x014C: "x86", 0x0200: "IA64", 0x8664: "x64", 0xAA64: "ARM64", 0x01C4: "ARM",
+};
+
+const DUMP_TYPES = {
+  0x01: "Full Dump", 0x02: "Kernel Dump", 0x03: "Small Dump (Mini)", 0x05: "Bitmap Dump",
+};
+
+const BUGCHECK_CODES = {
+  0x0000000A: "IRQL_NOT_LESS_OR_EQUAL",
+  0x0000001E: "KMODE_EXCEPTION_NOT_HANDLED",
+  0x00000019: "BAD_POOL_HEADER",
+  0x0000001A: "MEMORY_MANAGEMENT",
+  0x00000024: "NTFS_FILE_SYSTEM",
+  0x0000002E: "DATA_BUS_ERROR",
+  0x0000003B: "SYSTEM_SERVICE_EXCEPTION",
+  0x00000050: "PAGE_FAULT_IN_NONPAGED_AREA",
+  0x0000007A: "KERNEL_DATA_INPAGE_ERROR",
+  0x0000007B: "INACCESSIBLE_BOOT_DEVICE",
+  0x0000007E: "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED",
+  0x0000007F: "UNEXPECTED_KERNEL_MODE_TRAP",
+  0x0000009F: "DRIVER_POWER_STATE_FAILURE",
+  0x000000BE: "ATTEMPTED_WRITE_TO_READONLY_MEMORY",
+  0x000000C2: "BAD_POOL_CALLER",
+  0x000000C4: "DRIVER_VERIFIER_DETECTED_VIOLATION",
+  0x000000C5: "DRIVER_CORRUPTED_EXPOOL",
+  0x000000D1: "DRIVER_IRQL_NOT_LESS_OR_EQUAL",
+  0x000000EF: "CRITICAL_PROCESS_DIED",
+  0x000000F4: "CRITICAL_OBJECT_TERMINATION",
+  0x00000116: "VIDEO_TDR_TIMEOUT_DETECTED",
+  0x00000117: "VIDEO_TDR_FAILURE",
+  0x00000119: "VIDEO_SCHEDULER_INTERNAL_ERROR",
+  0x00000124: "WHEA_UNCORRECTABLE_ERROR",
+  0x00000133: "DPC_WATCHDOG_VIOLATION",
+  0x00000139: "KERNEL_SECURITY_CHECK_FAILURE",
+  0x0000013A: "KERNEL_MODE_HEAP_CORRUPTION",
+  0x00000154: "UNEXPECTED_STORE_EXCEPTION",
+  0x000001CA: "SYNTHETIC_WATCHDOG_TIMEOUT",
+};
+
+const FILETIME_EPOCH_DIFF = 11644473600; // 1601-01-01 → 1970-01-01 (seconds)
+
 // ============================================================
 // ヘルパー関数
 // ============================================================
@@ -342,6 +391,15 @@ function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str;
   return div.innerHTML;
+}
+
+function filetimeToStr(filetime) {
+  try {
+    const unixMs = (Number(filetime) / 10000) - (FILETIME_EPOCH_DIFF * 1000);
+    return new Date(unixMs).toISOString().replace("T", " ").replace(".000Z", " UTC");
+  } catch {
+    return `不明 (raw=${filetime})`;
+  }
 }
 
 // ============================================================
@@ -575,46 +633,230 @@ function findTDModules(modules) {
 }
 
 // ============================================================
-// メイン解析関数
+// フルクラッシュダンプ パーサー (PAGEDUMP / PAGEDU64)
 // ============================================================
 
-function parseMinidump(arrayBuffer, fileName) {
-  const dv = new DataView(arrayBuffer);
-  const header = parseHeader(dv);
-  const streams = readStreamDirectory(dv, header);
-
-  let systemInfo = null;
-  let modules = [];
-  let threads = [];
-  let exception = null;
-
-  for (const entry of streams) {
-    if (entry.rva + entry.data_size > dv.byteLength) continue;
-    if (entry.data_size === 0) continue;
-
-    switch (entry.stream_type) {
-      case 7: systemInfo = parseSystemInfo(dv, entry); break;
-      case 4: modules = parseModuleList(dv, entry); break;
-      case 3: threads = parseThreadList(dv, entry); break;
-      case 6: exception = parseException(dv, entry); break;
-    }
+function parseExceptionRecord64(dv, offset) {
+  if (offset + 0x98 > dv.byteLength) return null;
+  const excCode = dv.getUint32(offset, true);
+  const excFlags = dv.getUint32(offset + 4, true);
+  const excAddress = dv.getBigUint64(offset + 0x10, true);
+  const numParams = dv.getUint32(offset + 0x18, true);
+  if (excCode === 0 && Number(excAddress) === 0) return null;
+  const params = [];
+  for (let i = 0; i < Math.min(numParams, 15); i++) {
+    const po = offset + 0x20 + i * 8;
+    if (po + 8 > dv.byteLength) break;
+    params.push(dv.getBigUint64(po, true));
   }
+  return {
+    thread_id: 0,
+    exception_code: excCode,
+    exception_code_name: EXCEPTION_CODES[excCode] || `UNKNOWN(${toHex32(excCode)})`,
+    exception_flags: excFlags,
+    exception_address: excAddress,
+    number_parameters: numParams,
+    exception_parameters: params,
+  };
+}
 
-  const crashModule = findCrashModule(exception, modules);
-  const tdModules = findTDModules(modules);
+function parseExceptionRecord32(dv, offset) {
+  if (offset + 0x50 > dv.byteLength) return null;
+  const excCode = dv.getUint32(offset, true);
+  const excFlags = dv.getUint32(offset + 4, true);
+  const excAddress = dv.getUint32(offset + 0x0C, true);
+  const numParams = dv.getUint32(offset + 0x10, true);
+  if (excCode === 0 && excAddress === 0) return null;
+  const params = [];
+  for (let i = 0; i < Math.min(numParams, 15); i++) {
+    const po = offset + 0x14 + i * 4;
+    if (po + 4 > dv.byteLength) break;
+    params.push(BigInt(dv.getUint32(po, true)));
+  }
+  return {
+    thread_id: 0,
+    exception_code: excCode,
+    exception_code_name: EXCEPTION_CODES[excCode] || `UNKNOWN(${toHex32(excCode)})`,
+    exception_flags: excFlags,
+    exception_address: BigInt(excAddress),
+    number_parameters: numParams,
+    exception_parameters: params,
+  };
+}
+
+function parseCrashdump64(dv, fileName) {
+  if (dv.byteLength < 0x1030) throw new Error("ファイルサイズが小さすぎます（PAGEDU64ヘッダーに不足）");
+
+  const major = dv.getUint32(0x08, true);
+  const minor = dv.getUint32(0x0C, true);
+  const machineType = dv.getUint32(0x30, true);
+  const numProcs = dv.getUint32(0x34, true);
+  const bugcheckCode = dv.getUint32(0x38, true);
+  const bugcheckParams = [];
+  for (let i = 0; i < 4; i++) bugcheckParams.push(dv.getBigUint64(0x40 + i * 8, true));
+
+  const dumpType = dv.getUint32(0xF98, true);
+  const systemTime = dv.getBigUint64(0xFA8, true);
+  const exception = parseExceptionRecord64(dv, 0xF00);
+
+  const archName = MACHINE_IMAGE_TYPES[machineType] || `Unknown(0x${machineType.toString(16).toUpperCase()})`;
+  const dumpTypeName = DUMP_TYPES[dumpType] || `Unknown(${dumpType})`;
+  const bugcheckName = BUGCHECK_CODES[bugcheckCode] || `UNKNOWN(${toHex32(bugcheckCode)})`;
+  const tsStr = filetimeToStr(systemTime);
+
+  const unixTs = Number(systemTime) / 10000000 - FILETIME_EPOCH_DIFF;
 
   return {
     file_name: fileName,
-    file_size: arrayBuffer.byteLength,
-    header,
-    streams,
-    system_info: systemInfo,
-    modules,
-    threads,
+    file_size: dv.byteLength,
+    dump_format: "PAGEDU64",
+    dump_type_name: dumpTypeName,
+    header: {
+      signature: "PAGEDU64",
+      version: major,
+      implementation_version: minor,
+      number_of_streams: 0,
+      stream_directory_rva: 0,
+      checksum: 0,
+      timestamp: Math.floor(unixTs),
+      timestamp_str: tsStr,
+      flags: 0,
+    },
+    streams: [],
+    system_info: {
+      processor_architecture: machineType,
+      processor_architecture_name: archName,
+      processor_level: 0,
+      processor_revision: 0,
+      number_of_processors: numProcs,
+      os_version_major: major,
+      os_version_minor: minor,
+      os_build_number: 0,
+      os_platform_id: 2,
+      os_version_string: `Windows ${major}.${minor}`,
+    },
+    modules: [],
+    threads: [],
     exception,
-    crash_module: crashModule,
-    touchdesigner_modules: tdModules,
+    bugcheck: {
+      bugcheck_code: bugcheckCode,
+      bugcheck_code_name: bugcheckName,
+      bugcheck_parameters: bugcheckParams,
+    },
+    crash_module: null,
+    touchdesigner_modules: [],
   };
+}
+
+function parseCrashdump32(dv, fileName) {
+  if (dv.byteLength < 0xFC8) throw new Error("ファイルサイズが小さすぎます（PAGEDUMPヘッダーに不足）");
+
+  const major = dv.getUint32(0x08, true);
+  const minor = dv.getUint32(0x0C, true);
+  const machineType = dv.getUint32(0x20, true);
+  const numProcs = dv.getUint32(0x24, true);
+  const bugcheckCode = dv.getUint32(0x28, true);
+  const bugcheckParams = [];
+  for (let i = 0; i < 4; i++) bugcheckParams.push(BigInt(dv.getUint32(0x2C + i * 4, true)));
+
+  const dumpType = dv.getUint32(0xF88, true);
+  const systemTime = dv.getBigUint64(0xFC0, true);
+  const exception = parseExceptionRecord32(dv, 0x7D0);
+
+  const archName = MACHINE_IMAGE_TYPES[machineType] || `Unknown(0x${machineType.toString(16).toUpperCase()})`;
+  const dumpTypeName = DUMP_TYPES[dumpType] || `Unknown(${dumpType})`;
+  const bugcheckName = BUGCHECK_CODES[bugcheckCode] || `UNKNOWN(${toHex32(bugcheckCode)})`;
+  const tsStr = filetimeToStr(systemTime);
+
+  const unixTs = Number(systemTime) / 10000000 - FILETIME_EPOCH_DIFF;
+
+  return {
+    file_name: fileName,
+    file_size: dv.byteLength,
+    dump_format: "PAGEDUMP",
+    dump_type_name: dumpTypeName,
+    header: {
+      signature: "PAGEDUMP",
+      version: major,
+      implementation_version: minor,
+      number_of_streams: 0,
+      stream_directory_rva: 0,
+      checksum: 0,
+      timestamp: Math.floor(unixTs),
+      timestamp_str: tsStr,
+      flags: 0,
+    },
+    streams: [],
+    system_info: {
+      processor_architecture: machineType,
+      processor_architecture_name: archName,
+      processor_level: 0,
+      processor_revision: 0,
+      number_of_processors: numProcs,
+      os_version_major: major,
+      os_version_minor: minor,
+      os_build_number: 0,
+      os_platform_id: 2,
+      os_version_string: `Windows ${major}.${minor}`,
+    },
+    modules: [],
+    threads: [],
+    exception,
+    bugcheck: {
+      bugcheck_code: bugcheckCode,
+      bugcheck_code_name: bugcheckName,
+      bugcheck_parameters: bugcheckParams,
+    },
+    crash_module: null,
+    touchdesigner_modules: [],
+  };
+}
+
+// ============================================================
+// メイン解析関数（形式自動判定）
+// ============================================================
+
+function parseDumpFile(arrayBuffer, fileName) {
+  const dv = new DataView(arrayBuffer);
+  if (dv.byteLength < 8) throw new Error("ファイルサイズが小さすぎます");
+
+  // シグネチャ自動判定
+  const sig4 = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
+
+  if (sig4 === "MDMP") {
+    // 既存のMDMPパーサー
+    const header = parseHeader(dv);
+    const streams = readStreamDirectory(dv, header);
+    let systemInfo = null, modules = [], threads = [], exception = null;
+    for (const entry of streams) {
+      if (entry.rva + entry.data_size > dv.byteLength) continue;
+      if (entry.data_size === 0) continue;
+      switch (entry.stream_type) {
+        case 7: systemInfo = parseSystemInfo(dv, entry); break;
+        case 4: modules = parseModuleList(dv, entry); break;
+        case 3: threads = parseThreadList(dv, entry); break;
+        case 6: exception = parseException(dv, entry); break;
+      }
+    }
+    return {
+      file_name: fileName, file_size: arrayBuffer.byteLength,
+      dump_format: "MDMP", dump_type_name: "",
+      header, streams, system_info: systemInfo,
+      modules, threads, exception, bugcheck: null,
+      crash_module: findCrashModule(exception, modules),
+      touchdesigner_modules: findTDModules(modules),
+    };
+  }
+
+  if (sig4 === "PAGE") {
+    const valid4 = String.fromCharCode(dv.getUint8(4), dv.getUint8(5), dv.getUint8(6), dv.getUint8(7));
+    if (valid4 === "DU64") return parseCrashdump64(dv, fileName);
+    if (valid4 === "DUMP") return parseCrashdump32(dv, fileName);
+  }
+
+  throw new Error(
+    `未対応のダンプ形式です（シグネチャ: '${sig4}'）。MDMP, PAGEDUMP, PAGEDU64 のいずれかが必要です。`
+  );
 }
 
 // ============================================================
@@ -631,16 +873,27 @@ function renderKV(pairs) {
 }
 
 function displayReport(report) {
+  const isCrashdump = report.dump_format !== "MDMP";
+
   // Header Info
-  document.getElementById("headerInfo").innerHTML = renderKV([
+  const headerPairs = [
+    ["ダンプ形式", report.dump_format],
+  ];
+  if (report.dump_type_name) headerPairs.push(["ダンプ種別", report.dump_type_name]);
+  headerPairs.push(
     ["シグネチャ", report.header.signature],
     ["バージョン", `${report.header.version} (impl: ${report.header.implementation_version})`],
     ["タイムスタンプ", report.header.timestamp_str],
-    ["ストリーム数", report.header.number_of_streams],
-    ["チェックサム", toHex32(report.header.checksum)],
-    ["フラグ", "0x" + report.header.flags.toString(16).toUpperCase().padStart(16, "0")],
     ["ファイルサイズ", formatSize(report.file_size)],
-  ]);
+  );
+  if (!isCrashdump) {
+    headerPairs.push(
+      ["ストリーム数", report.header.number_of_streams],
+      ["チェックサム", toHex32(report.header.checksum)],
+      ["フラグ", "0x" + report.header.flags.toString(16).toUpperCase().padStart(16, "0")],
+    );
+  }
+  document.getElementById("headerInfo").innerHTML = renderKV(headerPairs);
 
   // System Info
   const si = report.system_info;
@@ -655,6 +908,30 @@ function displayReport(report) {
     ]);
   } else {
     document.getElementById("systemInfo").innerHTML = '<p class="no-data">SystemInfoStream が見つかりません</p>';
+  }
+
+  // BugCheck Info (crashdump only)
+  const bc = report.bugcheck;
+  const bugcheckSection = document.getElementById("bugcheckSection");
+  if (bc) {
+    let bcHtml = '<div class="exception-highlight">';
+    bcHtml += renderKV([
+      ["BugCheck コード", `${toHex32(bc.bugcheck_code)} (${bc.bugcheck_code_name})`],
+    ]);
+    if (bc.bugcheck_parameters && bc.bugcheck_parameters.length > 0) {
+      bcHtml += '<div style="margin-top:8px"><dt style="color:#cc9060;margin-bottom:4px">パラメータ:</dt>';
+      for (let i = 0; i < bc.bugcheck_parameters.length; i++) {
+        const p = bc.bugcheck_parameters[i];
+        const hexStr = typeof p === "bigint" ? toHex64(p) : toHex64(BigInt(p));
+        bcHtml += `<dd class="mono" style="color:#ffd0a0;margin-left:16px">[${i}] ${hexStr}</dd>`;
+      }
+      bcHtml += "</div>";
+    }
+    bcHtml += "</div>";
+    document.getElementById("bugcheckInfo").innerHTML = bcHtml;
+    bugcheckSection.style.display = "";
+  } else {
+    bugcheckSection.style.display = "none";
   }
 
   // Exception Info
@@ -772,6 +1049,8 @@ function buildExportJSON(report) {
   const data = {
     file_name: report.file_name,
     file_size: report.file_size,
+    dump_format: report.dump_format,
+    dump_type_name: report.dump_type_name || "",
     header: report.header,
     streams: report.streams,
     system_info: report.system_info,
@@ -792,6 +1071,12 @@ function buildExportJSON(report) {
       exception_address: Number(report.exception.exception_address),
       exception_address_hex: toHex64(report.exception.exception_address),
       exception_parameters: report.exception.exception_parameters.map(p => Number(p)),
+    } : null,
+    bugcheck: report.bugcheck ? {
+      bugcheck_code: report.bugcheck.bugcheck_code,
+      bugcheck_code_hex: toHex32(report.bugcheck.bugcheck_code),
+      bugcheck_code_name: report.bugcheck.bugcheck_code_name,
+      bugcheck_parameters: report.bugcheck.bugcheck_parameters.map(p => Number(p)),
     } : null,
     crash_module: report.crash_module,
     touchdesigner_modules: report.touchdesigner_modules,
@@ -842,7 +1127,7 @@ function handleFile(file) {
   const reader = new FileReader();
   reader.onload = function(e) {
     try {
-      currentReport = parseMinidump(e.target.result, file.name);
+      currentReport = parseDumpFile(e.target.result, file.name);
       loading.style.display = "none";
       displayReport(currentReport);
     } catch (err) {

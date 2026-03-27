@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Minidump Analyzer - TouchDesigner Crash Dump Parser</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: #0f0f1a;
+  color: #e0e0e0;
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+.container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+header {
+  text-align: center;
+  padding: 32px 0 16px;
+  border-bottom: 1px solid #2a2a40;
+  margin-bottom: 24px;
+}
+header h1 { font-size: 1.8rem; color: #7eb8ff; margin-bottom: 4px; }
+header p { color: #888; font-size: 0.9rem; }
+
+/* Drop Zone */
+.drop-zone {
+  border: 2px dashed #3a3a5c;
+  border-radius: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 24px;
+  background: #14142a;
+}
+.drop-zone:hover, .drop-zone.drag-over {
+  border-color: #7eb8ff;
+  background: #1a1a35;
+}
+.drop-zone h2 { font-size: 1.2rem; color: #aaa; font-weight: normal; margin-bottom: 8px; }
+.drop-zone p { color: #666; font-size: 0.85rem; }
+.drop-zone input[type="file"] { display: none; }
+
+/* Error */
+.error-box {
+  background: #2a1020;
+  border: 1px solid #ff4060;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 24px;
+  color: #ff8090;
+  display: none;
+}
+
+/* Report */
+#report { display: none; }
+
+.report-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.report-header h2 { color: #7eb8ff; font-size: 1.3rem; }
+
+.btn {
+  background: #2a3a5c;
+  color: #7eb8ff;
+  border: 1px solid #3a4a6c;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s;
+}
+.btn:hover { background: #3a4a6c; }
+
+/* Sections */
+details {
+  background: #14142a;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+summary {
+  padding: 12px 16px;
+  cursor: pointer;
+  font-weight: 600;
+  color: #c0c8e0;
+  user-select: none;
+  list-style: none;
+}
+summary::before {
+  content: "\25B6";
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 0.7rem;
+  transition: transform 0.2s;
+}
+details[open] > summary::before { transform: rotate(90deg); }
+summary::-webkit-details-marker { display: none; }
+
+.section-body { padding: 0 16px 16px; }
+
+/* Key-Value pairs */
+.kv { display: grid; grid-template-columns: 200px 1fr; gap: 4px 12px; font-size: 0.9rem; }
+.kv dt { color: #888; }
+.kv dd { color: #e0e0e0; }
+
+/* Exception highlight */
+.exception-highlight {
+  background: #2a1a10;
+  border: 1px solid #ff8040;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 8px;
+}
+.exception-highlight .kv dt { color: #cc9060; }
+.exception-highlight .kv dd { color: #ffd0a0; }
+
+/* Tables */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.data-table th {
+  text-align: left;
+  padding: 8px;
+  background: #1a1a30;
+  color: #8090b0;
+  font-weight: 600;
+  border-bottom: 1px solid #2a2a40;
+  position: sticky;
+  top: 0;
+}
+.data-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #1a1a30;
+  vertical-align: top;
+}
+.data-table tr:hover td { background: #1a1a2e; }
+
+/* Monospace */
+.mono { font-family: "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace; font-size: 0.82rem; }
+
+/* TD module tag */
+.td-tag {
+  display: inline-block;
+  background: #1a2a1a;
+  color: #60cc60;
+  border: 1px solid #2a4a2a;
+  border-radius: 4px;
+  padding: 2px 8px;
+  margin: 2px 4px 2px 0;
+  font-size: 0.82rem;
+}
+
+/* Filter */
+.filter-input {
+  width: 100%;
+  background: #1a1a30;
+  border: 1px solid #2a2a40;
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #e0e0e0;
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+  outline: none;
+}
+.filter-input:focus { border-color: #7eb8ff; }
+.filter-input::placeholder { color: #555; }
+
+.table-wrap { max-height: 400px; overflow-y: auto; }
+
+/* No data */
+.no-data { color: #666; font-style: italic; padding: 8px 0; }
+
+/* Loading */
+.loading {
+  text-align: center;
+  padding: 24px;
+  color: #888;
+  display: none;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Minidump Analyzer</h1>
+  <p>TouchDesigner / Windows .dmp crash dump parser &mdash; MDMP, PAGEDUMP, PAGEDU64 対応 &mdash; runs entirely in browser</p>
+</header>
+
+<div class="drop-zone" id="dropZone">
+  <h2>.dmp ファイルをドロップ、またはクリックして選択</h2>
+  <p>MDMP / PAGEDUMP / PAGEDU64 形式に対応</p>
+  <input type="file" id="fileInput" accept=".dmp,.mdmp">
+</div>
+
+<div class="loading" id="loading">解析中...</div>
+<div class="error-box" id="errorBox"></div>
+
+<div id="report">
+  <div class="report-header">
+    <h2>解析レポート</h2>
+    <button class="btn" id="exportBtn">JSON エクスポート</button>
+  </div>
+
+  <!-- Header Info -->
+  <details open>
+    <summary>ヘッダー情報</summary>
+    <div class="section-body" id="headerInfo"></div>
+  </details>
+
+  <!-- System Info -->
+  <details open>
+    <summary>システム情報</summary>
+    <div class="section-body" id="systemInfo"></div>
+  </details>
+
+  <!-- BugCheck (BSOD) -->
+  <details open id="bugcheckSection" style="display:none">
+    <summary>BugCheck (BSOD) 情報</summary>
+    <div class="section-body" id="bugcheckInfo"></div>
+  </details>
+
+  <!-- Exception -->
+  <details open>
+    <summary>例外情報</summary>
+    <div class="section-body" id="exceptionInfo"></div>
+  </details>
+
+  <!-- TouchDesigner Modules -->
+  <details open>
+    <summary id="tdModulesTitle">TouchDesigner 関連モジュール</summary>
+    <div class="section-body" id="tdModules"></div>
+  </details>
+
+  <!-- Modules -->
+  <details>
+    <summary id="modulesTitle">モジュール一覧</summary>
+    <div class="section-body" id="modulesInfo"></div>
+  </details>
+
+  <!-- Threads -->
+  <details>
+    <summary id="threadsTitle">スレッド一覧</summary>
+    <div class="section-body" id="threadsInfo"></div>
+  </details>
+
+  <!-- Stream Directory -->
+  <details>
+    <summary id="streamsTitle">ストリームディレクトリ</summary>
+    <div class="section-body" id="streamsInfo"></div>
+  </details>
+</div>
+
+</div>
+
+<script>
+// ============================================================
+// 定数マップ（Python版 MinidumpParser のクラス変数と同一）
+// ============================================================
+
+const STREAM_TYPES = {
+  0: "UnusedStream", 1: "ReservedStream0", 2: "ReservedStream1",
+  3: "ThreadListStream", 4: "ModuleListStream", 5: "MemoryListStream",
+  6: "ExceptionStream", 7: "SystemInfoStream", 8: "ThreadExListStream",
+  9: "Memory64ListStream", 10: "CommentStreamA", 11: "CommentStreamW",
+  12: "HandleDataStream", 13: "FunctionTableStream",
+  14: "UnloadedModuleListStream", 15: "MiscInfoStream",
+  16: "MemoryInfoListStream", 17: "ThreadInfoListStream",
+  18: "HandleOperationListStream", 19: "TokenStream",
+  20: "JavaScriptDataStream", 21: "SystemMemoryInfoStream",
+  22: "ProcessVmCountersStream", 23: "IptTraceStream", 24: "ThreadNamesStream",
+};
+
+const EXCEPTION_CODES = {
+  0xC0000005: "ACCESS_VIOLATION",
+  0xC0000006: "IN_PAGE_ERROR",
+  0xC0000008: "INVALID_HANDLE",
+  0xC000001D: "ILLEGAL_INSTRUCTION",
+  0xC0000025: "NONCONTINUABLE_EXCEPTION",
+  0xC0000026: "INVALID_DISPOSITION",
+  0xC000008C: "ARRAY_BOUNDS_EXCEEDED",
+  0xC000008D: "FLOAT_DENORMAL_OPERAND",
+  0xC000008E: "FLOAT_DIVIDE_BY_ZERO",
+  0xC000008F: "FLOAT_INEXACT_RESULT",
+  0xC0000090: "FLOAT_INVALID_OPERATION",
+  0xC0000091: "FLOAT_OVERFLOW",
+  0xC0000092: "FLOAT_STACK_CHECK",
+  0xC0000093: "FLOAT_UNDERFLOW",
+  0xC0000094: "INTEGER_DIVIDE_BY_ZERO",
+  0xC0000095: "INTEGER_OVERFLOW",
+  0xC0000096: "PRIVILEGED_INSTRUCTION",
+  0xC00000FD: "STACK_OVERFLOW",
+  0xC0000135: "DLL_NOT_FOUND",
+  0xC0000142: "DLL_INIT_FAILED",
+  0xC0000409: "STACK_BUFFER_OVERRUN",
+  0xC0000417: "INVALID_CRUNTIME_PARAMETER",
+  0xC0000602: "UNKNOWN_REVISION",
+  0xC06D007E: "MODULE_NOT_FOUND",
+  0xC06D007F: "PROCEDURE_NOT_FOUND",
+  0xE06D7363: "CPP_EXCEPTION",
+  0x40000015: "STATUS_FATAL_APP_EXIT",
+  0x40010006: "DBG_PRINTEXCEPTION_C",
+  0x4001000A: "DBG_PRINTEXCEPTION_WIDE_C",
+  0x80000001: "GUARD_PAGE_VIOLATION",
+  0x80000003: "BREAKPOINT",
+  0x80000004: "SINGLE_STEP",
+};
+
+const PROCESSOR_ARCHITECTURES = {
+  0: "x86", 5: "ARM", 6: "IA64", 9: "x64", 12: "ARM64",
+};
+
+const TD_MODULE_PATTERNS = [
+  "touchdesigner", "touchengine", "touchplayer", "derivative",
+  "td_", "top_", "chop_", "sop_", "dat_", "comp_", "mat_",
+];
+
+// フルクラッシュダンプ用定数
+const MACHINE_IMAGE_TYPES = {
+  0x014C: "x86", 0x0200: "IA64", 0x8664: "x64", 0xAA64: "ARM64", 0x01C4: "ARM",
+};
+
+const DUMP_TYPES = {
+  0x01: "Full Dump", 0x02: "Kernel Dump", 0x03: "Small Dump (Mini)", 0x05: "Bitmap Dump",
+};
+
+const BUGCHECK_CODES = {
+  0x0000000A: "IRQL_NOT_LESS_OR_EQUAL",
+  0x0000001E: "KMODE_EXCEPTION_NOT_HANDLED",
+  0x00000019: "BAD_POOL_HEADER",
+  0x0000001A: "MEMORY_MANAGEMENT",
+  0x00000024: "NTFS_FILE_SYSTEM",
+  0x0000002E: "DATA_BUS_ERROR",
+  0x0000003B: "SYSTEM_SERVICE_EXCEPTION",
+  0x00000050: "PAGE_FAULT_IN_NONPAGED_AREA",
+  0x0000007A: "KERNEL_DATA_INPAGE_ERROR",
+  0x0000007B: "INACCESSIBLE_BOOT_DEVICE",
+  0x0000007E: "SYSTEM_THREAD_EXCEPTION_NOT_HANDLED",
+  0x0000007F: "UNEXPECTED_KERNEL_MODE_TRAP",
+  0x0000009F: "DRIVER_POWER_STATE_FAILURE",
+  0x000000BE: "ATTEMPTED_WRITE_TO_READONLY_MEMORY",
+  0x000000C2: "BAD_POOL_CALLER",
+  0x000000C4: "DRIVER_VERIFIER_DETECTED_VIOLATION",
+  0x000000C5: "DRIVER_CORRUPTED_EXPOOL",
+  0x000000D1: "DRIVER_IRQL_NOT_LESS_OR_EQUAL",
+  0x000000EF: "CRITICAL_PROCESS_DIED",
+  0x000000F4: "CRITICAL_OBJECT_TERMINATION",
+  0x00000116: "VIDEO_TDR_TIMEOUT_DETECTED",
+  0x00000117: "VIDEO_TDR_FAILURE",
+  0x00000119: "VIDEO_SCHEDULER_INTERNAL_ERROR",
+  0x00000124: "WHEA_UNCORRECTABLE_ERROR",
+  0x00000133: "DPC_WATCHDOG_VIOLATION",
+  0x00000139: "KERNEL_SECURITY_CHECK_FAILURE",
+  0x0000013A: "KERNEL_MODE_HEAP_CORRUPTION",
+  0x00000154: "UNEXPECTED_STORE_EXCEPTION",
+  0x000001CA: "SYNTHETIC_WATCHDOG_TIMEOUT",
+};
+
+const FILETIME_EPOCH_DIFF = 11644473600; // 1601-01-01 → 1970-01-01 (seconds)
+
+// ============================================================
+// ヘルパー関数
+// ============================================================
+
+function toHex32(val) {
+  return "0x" + (val >>> 0).toString(16).toUpperCase().padStart(8, "0");
+}
+
+function toHex64(bigVal) {
+  return "0x" + bigVal.toString(16).toUpperCase().padStart(16, "0");
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function filetimeToStr(filetime) {
+  try {
+    const unixMs = (Number(filetime) / 10000) - (FILETIME_EPOCH_DIFF * 1000);
+    return new Date(unixMs).toISOString().replace("T", " ").replace(".000Z", " UTC");
+  } catch {
+    return `不明 (raw=${filetime})`;
+  }
+}
+
+// ============================================================
+// パース関数群
+// ============================================================
+
+function readMinidumpString(dv, rva) {
+  if (rva + 4 > dv.byteLength) return "";
+  const length = dv.getUint32(rva, true);
+  const start = rva + 4;
+  if (start + length > dv.byteLength) return "";
+  try {
+    const bytes = new Uint8Array(dv.buffer, start, length);
+    const decoder = new TextDecoder("utf-16le");
+    return decoder.decode(bytes);
+  } catch {
+    return "";
+  }
+}
+
+function parseHeader(dv) {
+  if (dv.byteLength < 32) {
+    throw new Error("ファイルサイズが小さすぎます（最低32バイト必要）");
+  }
+
+  const sig = String.fromCharCode(
+    dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)
+  );
+  if (sig !== "MDMP") {
+    throw new Error(`無効なミニダンプシグネチャ: '${sig}'（'MDMP'が必要）`);
+  }
+
+  const version = dv.getUint16(4, true);
+  const implVersion = dv.getUint16(6, true);
+  const numStreams = dv.getUint32(8, true);
+  const streamDirRva = dv.getUint32(12, true);
+  const checksum = dv.getUint32(16, true);
+  const timestamp = dv.getUint32(20, true);
+  const flagsLo = dv.getUint32(24, true);
+  const flagsHi = dv.getUint32(28, true);
+  const flags = (BigInt(flagsHi) << 32n) | BigInt(flagsLo);
+
+  let tsStr;
+  try {
+    tsStr = new Date(timestamp * 1000).toISOString().replace("T", " ").replace(".000Z", " UTC");
+  } catch {
+    tsStr = `不明 (raw=${timestamp})`;
+  }
+
+  return {
+    signature: sig,
+    version,
+    implementation_version: implVersion,
+    number_of_streams: numStreams,
+    stream_directory_rva: streamDirRva,
+    checksum,
+    timestamp,
+    timestamp_str: tsStr,
+    flags: Number(flags),
+  };
+}
+
+function readStreamDirectory(dv, header) {
+  const entries = [];
+  let offset = header.stream_directory_rva;
+
+  for (let i = 0; i < header.number_of_streams; i++) {
+    if (offset + 12 > dv.byteLength) break;
+    const streamType = dv.getUint32(offset, true);
+    const dataSize = dv.getUint32(offset + 4, true);
+    const rva = dv.getUint32(offset + 8, true);
+    entries.push({
+      stream_type: streamType,
+      stream_type_name: STREAM_TYPES[streamType] || `Unknown(${streamType})`,
+      data_size: dataSize,
+      rva,
+    });
+    offset += 12;
+  }
+  return entries;
+}
+
+function parseSystemInfo(dv, entry) {
+  const o = entry.rva;
+  const procArch = dv.getUint16(o, true);
+  const procLevel = dv.getUint16(o + 2, true);
+  const procRevision = dv.getUint16(o + 4, true);
+  const numProcs = dv.getUint8(o + 6);
+
+  const major = dv.getUint32(o + 8, true);
+  const minor = dv.getUint32(o + 12, true);
+  const build = dv.getUint32(o + 16, true);
+  const platformId = dv.getUint32(o + 20, true);
+
+  return {
+    processor_architecture: procArch,
+    processor_architecture_name: PROCESSOR_ARCHITECTURES[procArch] || `Unknown(${procArch})`,
+    processor_level: procLevel,
+    processor_revision: procRevision,
+    number_of_processors: numProcs,
+    os_version_major: major,
+    os_version_minor: minor,
+    os_build_number: build,
+    os_platform_id: platformId,
+    os_version_string: `Windows ${major}.${minor} Build ${build}`,
+  };
+}
+
+function parseModuleList(dv, entry) {
+  let offset = entry.rva;
+  const numModules = dv.getUint32(offset, true);
+  offset += 4;
+
+  const modules = [];
+  const ENTRY_SIZE = 108;
+
+  for (let i = 0; i < numModules; i++) {
+    if (offset + ENTRY_SIZE > dv.byteLength) break;
+
+    const base = dv.getBigUint64(offset, true);
+    const size = dv.getUint32(offset + 8, true);
+    const checksum = dv.getUint32(offset + 12, true);
+    const ts = dv.getUint32(offset + 16, true);
+    const nameRva = dv.getUint32(offset + 20, true);
+
+    const modulePath = readMinidumpString(dv, nameRva);
+    const parts = modulePath.split("\\");
+    const moduleName = parts[parts.length - 1] || modulePath;
+
+    modules.push({
+      base_address: base,
+      size,
+      module_name: moduleName,
+      module_path: modulePath,
+      timestamp: ts,
+      checksum,
+    });
+    offset += ENTRY_SIZE;
+  }
+  return modules;
+}
+
+function parseThreadList(dv, entry) {
+  let offset = entry.rva;
+  const numThreads = dv.getUint32(offset, true);
+  offset += 4;
+
+  const threads = [];
+  const ENTRY_SIZE = 48;
+
+  for (let i = 0; i < numThreads; i++) {
+    if (offset + ENTRY_SIZE > dv.byteLength) break;
+
+    const threadId = dv.getUint32(offset, true);
+    const suspend = dv.getUint32(offset + 4, true);
+    const pclass = dv.getUint32(offset + 8, true);
+    const priority = dv.getUint32(offset + 12, true);
+    const stackStart = dv.getBigUint64(offset + 24, true);
+    const stackSize = dv.getUint32(offset + 32, true);
+
+    threads.push({
+      thread_id: threadId,
+      suspend_count: suspend,
+      priority_class: pclass,
+      priority,
+      stack_start: stackStart,
+      stack_size: stackSize,
+    });
+    offset += ENTRY_SIZE;
+  }
+  return threads;
+}
+
+function parseException(dv, entry) {
+  let offset = entry.rva;
+
+  const threadId = dv.getUint32(offset, true);
+  offset += 8; // ThreadId + alignment
+
+  const excCode = dv.getUint32(offset, true);
+  const excFlags = dv.getUint32(offset + 4, true);
+  // ExceptionRecord (Q) skipped at offset + 8
+  const excAddress = dv.getBigUint64(offset + 16, true);
+  const numParams = dv.getUint32(offset + 24, true);
+  // unused alignment at offset + 28
+
+  const params = [];
+  let paramOffset = offset + 32;
+  const maxParams = Math.min(numParams, 15);
+  for (let i = 0; i < maxParams; i++) {
+    if (paramOffset + 8 > dv.byteLength) break;
+    params.push(dv.getBigUint64(paramOffset, true));
+    paramOffset += 8;
+  }
+
+  return {
+    thread_id: threadId,
+    exception_code: excCode,
+    exception_code_name: EXCEPTION_CODES[excCode] || `UNKNOWN(${toHex32(excCode)})`,
+    exception_flags: excFlags,
+    exception_address: excAddress,
+    number_parameters: numParams,
+    exception_parameters: params,
+  };
+}
+
+function findCrashModule(exception, modules) {
+  if (!exception) return null;
+  const addr = exception.exception_address;
+  for (const mod of modules) {
+    if (addr >= mod.base_address && addr < mod.base_address + BigInt(mod.size)) {
+      return mod.module_name;
+    }
+  }
+  return null;
+}
+
+function findTDModules(modules) {
+  const result = [];
+  for (const mod of modules) {
+    const nameLower = mod.module_name.toLowerCase();
+    const pathLower = mod.module_path.toLowerCase();
+    for (const pattern of TD_MODULE_PATTERNS) {
+      if (nameLower.includes(pattern) || pathLower.includes(pattern)) {
+        result.push(mod.module_name);
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+// ============================================================
+// フルクラッシュダンプ パーサー (PAGEDUMP / PAGEDU64)
+// ============================================================
+
+function parseExceptionRecord64(dv, offset) {
+  if (offset + 0x98 > dv.byteLength) return null;
+  const excCode = dv.getUint32(offset, true);
+  const excFlags = dv.getUint32(offset + 4, true);
+  const excAddress = dv.getBigUint64(offset + 0x10, true);
+  const numParams = dv.getUint32(offset + 0x18, true);
+  if (excCode === 0 && Number(excAddress) === 0) return null;
+  const params = [];
+  for (let i = 0; i < Math.min(numParams, 15); i++) {
+    const po = offset + 0x20 + i * 8;
+    if (po + 8 > dv.byteLength) break;
+    params.push(dv.getBigUint64(po, true));
+  }
+  return {
+    thread_id: 0,
+    exception_code: excCode,
+    exception_code_name: EXCEPTION_CODES[excCode] || `UNKNOWN(${toHex32(excCode)})`,
+    exception_flags: excFlags,
+    exception_address: excAddress,
+    number_parameters: numParams,
+    exception_parameters: params,
+  };
+}
+
+function parseExceptionRecord32(dv, offset) {
+  if (offset + 0x50 > dv.byteLength) return null;
+  const excCode = dv.getUint32(offset, true);
+  const excFlags = dv.getUint32(offset + 4, true);
+  const excAddress = dv.getUint32(offset + 0x0C, true);
+  const numParams = dv.getUint32(offset + 0x10, true);
+  if (excCode === 0 && excAddress === 0) return null;
+  const params = [];
+  for (let i = 0; i < Math.min(numParams, 15); i++) {
+    const po = offset + 0x14 + i * 4;
+    if (po + 4 > dv.byteLength) break;
+    params.push(BigInt(dv.getUint32(po, true)));
+  }
+  return {
+    thread_id: 0,
+    exception_code: excCode,
+    exception_code_name: EXCEPTION_CODES[excCode] || `UNKNOWN(${toHex32(excCode)})`,
+    exception_flags: excFlags,
+    exception_address: BigInt(excAddress),
+    number_parameters: numParams,
+    exception_parameters: params,
+  };
+}
+
+function parseCrashdump64(dv, fileName) {
+  if (dv.byteLength < 0x1030) throw new Error("ファイルサイズが小さすぎます（PAGEDU64ヘッダーに不足）");
+
+  const major = dv.getUint32(0x08, true);
+  const minor = dv.getUint32(0x0C, true);
+  const machineType = dv.getUint32(0x30, true);
+  const numProcs = dv.getUint32(0x34, true);
+  const bugcheckCode = dv.getUint32(0x38, true);
+  const bugcheckParams = [];
+  for (let i = 0; i < 4; i++) bugcheckParams.push(dv.getBigUint64(0x40 + i * 8, true));
+
+  const dumpType = dv.getUint32(0xF98, true);
+  const systemTime = dv.getBigUint64(0xFA8, true);
+  const exception = parseExceptionRecord64(dv, 0xF00);
+
+  const archName = MACHINE_IMAGE_TYPES[machineType] || `Unknown(0x${machineType.toString(16).toUpperCase()})`;
+  const dumpTypeName = DUMP_TYPES[dumpType] || `Unknown(${dumpType})`;
+  const bugcheckName = BUGCHECK_CODES[bugcheckCode] || `UNKNOWN(${toHex32(bugcheckCode)})`;
+  const tsStr = filetimeToStr(systemTime);
+
+  const unixTs = Number(systemTime) / 10000000 - FILETIME_EPOCH_DIFF;
+
+  return {
+    file_name: fileName,
+    file_size: dv.byteLength,
+    dump_format: "PAGEDU64",
+    dump_type_name: dumpTypeName,
+    header: {
+      signature: "PAGEDU64",
+      version: major,
+      implementation_version: minor,
+      number_of_streams: 0,
+      stream_directory_rva: 0,
+      checksum: 0,
+      timestamp: Math.floor(unixTs),
+      timestamp_str: tsStr,
+      flags: 0,
+    },
+    streams: [],
+    system_info: {
+      processor_architecture: machineType,
+      processor_architecture_name: archName,
+      processor_level: 0,
+      processor_revision: 0,
+      number_of_processors: numProcs,
+      os_version_major: major,
+      os_version_minor: minor,
+      os_build_number: 0,
+      os_platform_id: 2,
+      os_version_string: `Windows ${major}.${minor}`,
+    },
+    modules: [],
+    threads: [],
+    exception,
+    bugcheck: {
+      bugcheck_code: bugcheckCode,
+      bugcheck_code_name: bugcheckName,
+      bugcheck_parameters: bugcheckParams,
+    },
+    crash_module: null,
+    touchdesigner_modules: [],
+  };
+}
+
+function parseCrashdump32(dv, fileName) {
+  if (dv.byteLength < 0xFC8) throw new Error("ファイルサイズが小さすぎます（PAGEDUMPヘッダーに不足）");
+
+  const major = dv.getUint32(0x08, true);
+  const minor = dv.getUint32(0x0C, true);
+  const machineType = dv.getUint32(0x20, true);
+  const numProcs = dv.getUint32(0x24, true);
+  const bugcheckCode = dv.getUint32(0x28, true);
+  const bugcheckParams = [];
+  for (let i = 0; i < 4; i++) bugcheckParams.push(BigInt(dv.getUint32(0x2C + i * 4, true)));
+
+  const dumpType = dv.getUint32(0xF88, true);
+  const systemTime = dv.getBigUint64(0xFC0, true);
+  const exception = parseExceptionRecord32(dv, 0x7D0);
+
+  const archName = MACHINE_IMAGE_TYPES[machineType] || `Unknown(0x${machineType.toString(16).toUpperCase()})`;
+  const dumpTypeName = DUMP_TYPES[dumpType] || `Unknown(${dumpType})`;
+  const bugcheckName = BUGCHECK_CODES[bugcheckCode] || `UNKNOWN(${toHex32(bugcheckCode)})`;
+  const tsStr = filetimeToStr(systemTime);
+
+  const unixTs = Number(systemTime) / 10000000 - FILETIME_EPOCH_DIFF;
+
+  return {
+    file_name: fileName,
+    file_size: dv.byteLength,
+    dump_format: "PAGEDUMP",
+    dump_type_name: dumpTypeName,
+    header: {
+      signature: "PAGEDUMP",
+      version: major,
+      implementation_version: minor,
+      number_of_streams: 0,
+      stream_directory_rva: 0,
+      checksum: 0,
+      timestamp: Math.floor(unixTs),
+      timestamp_str: tsStr,
+      flags: 0,
+    },
+    streams: [],
+    system_info: {
+      processor_architecture: machineType,
+      processor_architecture_name: archName,
+      processor_level: 0,
+      processor_revision: 0,
+      number_of_processors: numProcs,
+      os_version_major: major,
+      os_version_minor: minor,
+      os_build_number: 0,
+      os_platform_id: 2,
+      os_version_string: `Windows ${major}.${minor}`,
+    },
+    modules: [],
+    threads: [],
+    exception,
+    bugcheck: {
+      bugcheck_code: bugcheckCode,
+      bugcheck_code_name: bugcheckName,
+      bugcheck_parameters: bugcheckParams,
+    },
+    crash_module: null,
+    touchdesigner_modules: [],
+  };
+}
+
+// ============================================================
+// メイン解析関数（形式自動判定）
+// ============================================================
+
+function parseDumpFile(arrayBuffer, fileName) {
+  const dv = new DataView(arrayBuffer);
+  if (dv.byteLength < 8) throw new Error("ファイルサイズが小さすぎます");
+
+  // シグネチャ自動判定
+  const sig4 = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
+
+  if (sig4 === "MDMP") {
+    // 既存のMDMPパーサー
+    const header = parseHeader(dv);
+    const streams = readStreamDirectory(dv, header);
+    let systemInfo = null, modules = [], threads = [], exception = null;
+    for (const entry of streams) {
+      if (entry.rva + entry.data_size > dv.byteLength) continue;
+      if (entry.data_size === 0) continue;
+      switch (entry.stream_type) {
+        case 7: systemInfo = parseSystemInfo(dv, entry); break;
+        case 4: modules = parseModuleList(dv, entry); break;
+        case 3: threads = parseThreadList(dv, entry); break;
+        case 6: exception = parseException(dv, entry); break;
+      }
+    }
+    return {
+      file_name: fileName, file_size: arrayBuffer.byteLength,
+      dump_format: "MDMP", dump_type_name: "",
+      header, streams, system_info: systemInfo,
+      modules, threads, exception, bugcheck: null,
+      crash_module: findCrashModule(exception, modules),
+      touchdesigner_modules: findTDModules(modules),
+    };
+  }
+
+  if (sig4 === "PAGE") {
+    const valid4 = String.fromCharCode(dv.getUint8(4), dv.getUint8(5), dv.getUint8(6), dv.getUint8(7));
+    if (valid4 === "DU64") return parseCrashdump64(dv, fileName);
+    if (valid4 === "DUMP") return parseCrashdump32(dv, fileName);
+  }
+
+  // 先頭16バイトをHex表示
+  const hexBytes = [];
+  for (let i = 0; i < Math.min(16, dv.byteLength); i++) {
+    hexBytes.push(dv.getUint8(i).toString(16).toUpperCase().padStart(2, "0"));
+  }
+  throw new Error(
+    `未対応のダンプ形式です。シグネチャ: '${sig4}'、先頭: [${hexBytes.join(" ")}]。` +
+    `MDMP, PAGEDUMP, PAGEDU64 のいずれかが必要です。`
+  );
+}
+
+// ============================================================
+// UI描画関数
+// ============================================================
+
+function renderKV(pairs) {
+  let html = '<dl class="kv">';
+  for (const [key, value] of pairs) {
+    html += `<dt>${escapeHtml(key)}</dt><dd class="mono">${escapeHtml(String(value))}</dd>`;
+  }
+  html += "</dl>";
+  return html;
+}
+
+function displayReport(report) {
+  const isCrashdump = report.dump_format !== "MDMP";
+
+  // Header Info
+  const headerPairs = [
+    ["ダンプ形式", report.dump_format],
+  ];
+  if (report.dump_type_name) headerPairs.push(["ダンプ種別", report.dump_type_name]);
+  headerPairs.push(
+    ["シグネチャ", report.header.signature],
+    ["バージョン", `${report.header.version} (impl: ${report.header.implementation_version})`],
+    ["タイムスタンプ", report.header.timestamp_str],
+    ["ファイルサイズ", formatSize(report.file_size)],
+  );
+  if (!isCrashdump) {
+    headerPairs.push(
+      ["ストリーム数", report.header.number_of_streams],
+      ["チェックサム", toHex32(report.header.checksum)],
+      ["フラグ", "0x" + report.header.flags.toString(16).toUpperCase().padStart(16, "0")],
+    );
+  }
+  document.getElementById("headerInfo").innerHTML = renderKV(headerPairs);
+
+  // System Info
+  const si = report.system_info;
+  if (si) {
+    document.getElementById("systemInfo").innerHTML = renderKV([
+      ["OS", si.os_version_string],
+      ["CPU アーキテクチャ", si.processor_architecture_name],
+      ["プロセッサレベル", si.processor_level],
+      ["プロセッサリビジョン", "0x" + si.processor_revision.toString(16).toUpperCase()],
+      ["プロセッサ数", si.number_of_processors],
+      ["プラットフォームID", si.os_platform_id],
+    ]);
+  } else {
+    document.getElementById("systemInfo").innerHTML = '<p class="no-data">SystemInfoStream が見つかりません</p>';
+  }
+
+  // BugCheck Info (crashdump only)
+  const bc = report.bugcheck;
+  const bugcheckSection = document.getElementById("bugcheckSection");
+  if (bc) {
+    let bcHtml = '<div class="exception-highlight">';
+    bcHtml += renderKV([
+      ["BugCheck コード", `${toHex32(bc.bugcheck_code)} (${bc.bugcheck_code_name})`],
+    ]);
+    if (bc.bugcheck_parameters && bc.bugcheck_parameters.length > 0) {
+      bcHtml += '<div style="margin-top:8px"><dt style="color:#cc9060;margin-bottom:4px">パラメータ:</dt>';
+      for (let i = 0; i < bc.bugcheck_parameters.length; i++) {
+        const p = bc.bugcheck_parameters[i];
+        const hexStr = typeof p === "bigint" ? toHex64(p) : toHex64(BigInt(p));
+        bcHtml += `<dd class="mono" style="color:#ffd0a0;margin-left:16px">[${i}] ${hexStr}</dd>`;
+      }
+      bcHtml += "</div>";
+    }
+    bcHtml += "</div>";
+    document.getElementById("bugcheckInfo").innerHTML = bcHtml;
+    bugcheckSection.style.display = "";
+  } else {
+    bugcheckSection.style.display = "none";
+  }
+
+  // Exception Info
+  const exc = report.exception;
+  if (exc) {
+    let html = '<div class="exception-highlight">';
+    html += renderKV([
+      ["例外コード", `${toHex32(exc.exception_code)} (${exc.exception_code_name})`],
+      ["例外アドレス", toHex64(exc.exception_address)],
+      ["スレッドID", toHex32(exc.thread_id)],
+      ["クラッシュモジュール", report.crash_module || "不明"],
+      ["例外フラグ", toHex32(exc.exception_flags)],
+      ["パラメータ数", exc.number_parameters],
+    ]);
+    if (exc.exception_parameters.length > 0) {
+      html += '<div style="margin-top:8px"><dt style="color:#cc9060;margin-bottom:4px">パラメータ:</dt>';
+      for (let i = 0; i < exc.exception_parameters.length; i++) {
+        html += `<dd class="mono" style="color:#ffd0a0;margin-left:16px">[${i}] ${toHex64(exc.exception_parameters[i])}</dd>`;
+      }
+      html += "</div>";
+    }
+    html += "</div>";
+    document.getElementById("exceptionInfo").innerHTML = html;
+  } else {
+    document.getElementById("exceptionInfo").innerHTML = '<p class="no-data">ExceptionStream が見つかりません（クラッシュ情報なし）</p>';
+  }
+
+  // TouchDesigner Modules
+  const tdMods = report.touchdesigner_modules;
+  document.getElementById("tdModulesTitle").textContent = `TouchDesigner 関連モジュール (${tdMods.length}個)`;
+  if (tdMods.length > 0) {
+    document.getElementById("tdModules").innerHTML = tdMods.map(
+      m => `<span class="td-tag">${escapeHtml(m)}</span>`
+    ).join("");
+  } else {
+    document.getElementById("tdModules").innerHTML = '<p class="no-data">TouchDesigner 関連モジュールは見つかりませんでした</p>';
+  }
+
+  // Modules Table
+  const mods = report.modules;
+  document.getElementById("modulesTitle").textContent = `モジュール一覧 (${mods.length}個)`;
+  let modHtml = '<input type="text" class="filter-input" placeholder="モジュール名で検索..." oninput="filterTable(this, \'modulesTable\')">';
+  modHtml += '<div class="table-wrap"><table class="data-table" id="modulesTable">';
+  modHtml += "<thead><tr><th>ベースアドレス</th><th>サイズ</th><th>モジュール名</th><th>パス</th></tr></thead><tbody>";
+  for (const m of mods) {
+    modHtml += `<tr>
+      <td class="mono">${toHex64(m.base_address)}</td>
+      <td class="mono">${formatSize(m.size)}</td>
+      <td>${escapeHtml(m.module_name)}</td>
+      <td style="color:#888;font-size:0.78rem">${escapeHtml(m.module_path)}</td>
+    </tr>`;
+  }
+  modHtml += "</tbody></table></div>";
+  document.getElementById("modulesInfo").innerHTML = modHtml;
+
+  // Threads Table
+  const threads = report.threads;
+  document.getElementById("threadsTitle").textContent = `スレッド一覧 (${threads.length}個)`;
+  let thHtml = '<div class="table-wrap"><table class="data-table">';
+  thHtml += "<thead><tr><th>スレッドID</th><th>サスペンド</th><th>優先度クラス</th><th>優先度</th><th>スタック開始</th><th>スタックサイズ</th></tr></thead><tbody>";
+  for (const t of threads) {
+    const isCrashThread = exc && t.thread_id === exc.thread_id;
+    const style = isCrashThread ? ' style="color:#ff8040;font-weight:600"' : "";
+    thHtml += `<tr${style}>
+      <td class="mono">${toHex32(t.thread_id)}${isCrashThread ? " *" : ""}</td>
+      <td class="mono">${t.suspend_count}</td>
+      <td class="mono">${t.priority_class}</td>
+      <td class="mono">${t.priority}</td>
+      <td class="mono">${toHex64(t.stack_start)}</td>
+      <td class="mono">${formatSize(t.stack_size)}</td>
+    </tr>`;
+  }
+  thHtml += "</tbody></table></div>";
+  if (exc) thHtml += '<p style="color:#888;font-size:0.78rem;margin-top:4px">* = クラッシュスレッド</p>';
+  document.getElementById("threadsInfo").innerHTML = thHtml;
+
+  // Stream Directory
+  const sts = report.streams;
+  document.getElementById("streamsTitle").textContent = `ストリームディレクトリ (${sts.length}個)`;
+  let stHtml = '<div class="table-wrap"><table class="data-table">';
+  stHtml += "<thead><tr><th>タイプID</th><th>タイプ名</th><th>データサイズ</th><th>RVA</th></tr></thead><tbody>";
+  for (const s of sts) {
+    stHtml += `<tr>
+      <td class="mono">${s.stream_type}</td>
+      <td>${escapeHtml(s.stream_type_name)}</td>
+      <td class="mono">${formatSize(s.data_size)}</td>
+      <td class="mono">${toHex32(s.rva)}</td>
+    </tr>`;
+  }
+  stHtml += "</tbody></table></div>";
+  document.getElementById("streamsInfo").innerHTML = stHtml;
+
+  document.getElementById("report").style.display = "block";
+}
+
+function filterTable(input, tableId) {
+  const filter = input.value.toLowerCase();
+  const rows = document.getElementById(tableId).querySelectorAll("tbody tr");
+  for (const row of rows) {
+    const text = row.textContent.toLowerCase();
+    row.style.display = text.includes(filter) ? "" : "none";
+  }
+}
+
+// ============================================================
+// JSON エクスポート
+// ============================================================
+
+function buildExportJSON(report) {
+  const bigIntToStr = (key, value) => {
+    if (typeof value === "bigint") return "0x" + value.toString(16).toUpperCase().padStart(16, "0");
+    return value;
+  };
+
+  const data = {
+    file_name: report.file_name,
+    file_size: report.file_size,
+    dump_format: report.dump_format,
+    dump_type_name: report.dump_type_name || "",
+    header: report.header,
+    streams: report.streams,
+    system_info: report.system_info,
+    modules: report.modules.map(m => ({
+      ...m,
+      base_address: Number(m.base_address),
+      base_address_hex: toHex64(m.base_address),
+    })),
+    threads: report.threads.map(t => ({
+      ...t,
+      thread_id_hex: toHex32(t.thread_id),
+      stack_start: Number(t.stack_start),
+      stack_start_hex: toHex64(t.stack_start),
+    })),
+    exception: report.exception ? {
+      ...report.exception,
+      exception_code_hex: toHex32(report.exception.exception_code),
+      exception_address: Number(report.exception.exception_address),
+      exception_address_hex: toHex64(report.exception.exception_address),
+      exception_parameters: report.exception.exception_parameters.map(p => Number(p)),
+    } : null,
+    bugcheck: report.bugcheck ? {
+      bugcheck_code: report.bugcheck.bugcheck_code,
+      bugcheck_code_hex: toHex32(report.bugcheck.bugcheck_code),
+      bugcheck_code_name: report.bugcheck.bugcheck_code_name,
+      bugcheck_parameters: report.bugcheck.bugcheck_parameters.map(p => Number(p)),
+    } : null,
+    crash_module: report.crash_module,
+    touchdesigner_modules: report.touchdesigner_modules,
+  };
+
+  return JSON.stringify(data, null, 2);
+}
+
+function exportJSON(report) {
+  const json = buildExportJSON(report);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = report.file_name.replace(/\.dmp$/i, "") + "_report.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ============================================================
+// ファイル入力ハンドリング
+// ============================================================
+
+let currentReport = null;
+
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("fileInput");
+const errorBox = document.getElementById("errorBox");
+const loading = document.getElementById("loading");
+const reportEl = document.getElementById("report");
+
+function showError(msg) {
+  errorBox.innerHTML = msg;
+  errorBox.style.display = "block";
+  reportEl.style.display = "none";
+  loading.style.display = "none";
+}
+
+function hideError() {
+  errorBox.style.display = "none";
+}
+
+function hexDump(arrayBuffer, maxBytes) {
+  const bytes = new Uint8Array(arrayBuffer, 0, Math.min(maxBytes, arrayBuffer.byteLength));
+  let hex = "", ascii = "", lines = [];
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).toUpperCase().padStart(2, "0") + " ";
+    ascii += (bytes[i] >= 0x20 && bytes[i] < 0x7F) ? String.fromCharCode(bytes[i]) : ".";
+    if ((i + 1) % 16 === 0 || i === bytes.length - 1) {
+      const addr = (i - (i % 16)).toString(16).toUpperCase().padStart(8, "0");
+      lines.push(`${addr}  ${hex.padEnd(48)} ${ascii}`);
+      hex = ""; ascii = "";
+    }
+  }
+  return lines.join("\n");
+}
+
+// 大容量ファイル対応: 必要な部分だけ段階的に読み込む
+// PAGEDUMP/PAGEDU64: 先頭8KBで解析完了
+// MDMP: ヘッダー→ストリームディレクトリ→必要なストリームのみ読み込み
+const CRASHDUMP_HEADER_SIZE = 0x2000; // 8KB (PAGEDU64用)
+const MDMP_META_MAX = 128 * 1024 * 1024; // メタデータ読み込み上限 128MB
+// メモリストリーム（巨大なので読まない）
+const MEMORY_STREAM_TYPES = new Set([5, 9, 16]);
+
+function readSlice(file, start, end) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("ファイルの読み込みに失敗しました"));
+    reader.readAsArrayBuffer(file.slice(start, end));
+  });
+}
+
+async function handleFile(file) {
+  hideError();
+  reportEl.style.display = "none";
+  loading.style.display = "block";
+
+  try {
+    // Step 1: 先頭8バイトで形式判定
+    const peekBuf = await readSlice(file, 0, 8);
+    if (peekBuf.byteLength < 4) throw new Error("ファイルサイズが小さすぎます");
+    const peek = new DataView(peekBuf);
+    const sig4 = String.fromCharCode(peek.getUint8(0), peek.getUint8(1), peek.getUint8(2), peek.getUint8(3));
+
+    if (sig4 === "PAGE") {
+      // フルクラッシュダンプ: 先頭8KBのみ
+      const headerBuf = await readSlice(file, 0, CRASHDUMP_HEADER_SIZE);
+      currentReport = parseDumpFile(headerBuf, file.name);
+      currentReport.file_size = file.size;
+
+    } else if (sig4 === "MDMP") {
+      // 大容量MDMP対応: 段階的読み込み
+      currentReport = await handleMdmpFile(file);
+
+    } else {
+      // 未知の形式: 先頭256バイトのHexダンプを表示
+      const diagBuf = await readSlice(file, 0, 256);
+      const dump = hexDump(diagBuf, 256);
+      showError(
+        `<strong>未対応のダンプ形式です</strong><br>` +
+        `シグネチャ: '${escapeHtml(sig4)}' (期待: 'MDMP', 'PAGE')<br>` +
+        `ファイルサイズ: ${formatSize(file.size)}<br><br>` +
+        `<strong>先頭256バイト（Hex Dump）:</strong><br>` +
+        `<pre style="margin-top:8px;font-size:0.75rem;overflow-x:auto;color:#ff8090">${escapeHtml(dump)}</pre>` +
+        `<br>この情報を開発者に共有することで、この形式への対応が可能になる場合があります。`
+      );
+      return;
+    }
+
+    loading.style.display = "none";
+    displayReport(currentReport);
+  } catch (err) {
+    showError("解析エラー: " + err.message);
+  }
+}
+
+async function handleMdmpFile(file) {
+  // Step 1: MDMPヘッダー読み込み（32バイト）
+  const headerBuf = await readSlice(file, 0, 32);
+  const hdr = new DataView(headerBuf);
+  const numStreams = hdr.getUint32(8, true);
+  const streamDirRva = hdr.getUint32(12, true);
+
+  // Step 2: ストリームディレクトリ読み込み
+  const dirSize = numStreams * 12;
+  const dirBuf = await readSlice(file, streamDirRva, streamDirRva + dirSize);
+  const dirDv = new DataView(dirBuf);
+
+  // Step 3: メタデータストリームの最大オフセットを算出
+  // メモリストリーム(type 5,9,16)は巨大なのでスキップ
+  let maxNeeded = streamDirRva + dirSize;
+
+  for (let i = 0; i < numStreams; i++) {
+    const off = i * 12;
+    if (off + 12 > dirBuf.byteLength) break;
+    const sType = dirDv.getUint32(off, true);
+    const sSize = dirDv.getUint32(off + 4, true);
+    const sRva = dirDv.getUint32(off + 8, true);
+
+    if (MEMORY_STREAM_TYPES.has(sType)) continue; // メモリストリームはスキップ
+    if (sSize > 0) {
+      const end = sRva + sSize;
+      if (end > maxNeeded) maxNeeded = end;
+    }
+  }
+
+  // 安全上限
+  if (maxNeeded > MDMP_META_MAX) maxNeeded = MDMP_META_MAX;
+
+  // Step 4: 必要な範囲をまとめて読み込み
+  const dataBuf = await readSlice(file, 0, maxNeeded);
+  const report = parseDumpFile(dataBuf, file.name);
+  report.file_size = file.size; // 実際のファイルサイズを反映
+  return report;
+}
+
+// Click to select
+dropZone.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", (e) => {
+  if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+// Drag and drop
+dropZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropZone.classList.add("drag-over");
+});
+dropZone.addEventListener("dragleave", () => {
+  dropZone.classList.remove("drag-over");
+});
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("drag-over");
+  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+});
+
+// Export button
+document.getElementById("exportBtn").addEventListener("click", () => {
+  if (currentReport) exportJSON(currentReport);
+});
+</script>
+</body>
+</html>
